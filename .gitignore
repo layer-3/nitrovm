@@ -1,0 +1,14 @@
+# Binaries
+cmd/nitrolite/nitrolite
+cmd/nitroctl/nitroctl
+
+# Rust build artifacts
+contracts/*/target/
+
+# SQLite state
+*.db
+*.db-wal
+*.db-shm
+
+# OS
+.DS_Store

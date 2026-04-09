@@ -1,0 +1,283 @@
+# NitroVM Specification
+
+## 1. Runtime
+
+NitroVM executes WebAssembly modules using the [CosmWasm VM](https://github.com/CosmWasm/cosmwasm) (wasmer) via [wasmvm](https://github.com/CosmWasm/wasmvm) CGO bindings. All contract execution is deterministic and sandboxed.
+
+The CosmWasm VM handles:
+- **Determinism** — float instructions, SIMD, threads, and non-deterministic opcodes are rejected at upload
+- **Gas metering** — injected into WASM bytecode via wasmer middleware at basic block boundaries
+- **Memory safety** — linear memory is bounded and isolated per contract instance
+
+### 1.1 Gas Metering
+
+Every WASM instruction consumes gas, paid in YELLOW (the native token). A transaction specifies a gas limit; execution halts if the limit is exceeded. CosmWasm's wasmer middleware instruments bytecode to deduct gas at each basic block entry. Host function calls carry additional costs:
+
+| Operation       | Cost   |
+|-----------------|--------|
+| WASM instruction| 1      |
+| Storage read    | 200    |
+| Storage write   | 5000   |
+| Hash (per byte) | 3      |
+| Signature verify| 3000   |
+
+> Costs are preliminary and subject to tuning.
+
+## 2. Accounts and Addresses
+
+Addresses are 20-byte values displayed as EVM-style hex (`0x` prefix, 40 hex chars). Both externally owned accounts (EOAs) and contracts share the same address space.
+
+Each account has:
+
+| Field   | Description                      |
+|---------|----------------------------------|
+| Address | 20-byte identifier               |
+| Balance | YELLOW token balance (uint256)   |
+| Nonce   | Transaction counter (EOA only)   |
+| CodeHash| Hash of stored WASM bytecode (contracts only) |
+
+## 3. Contract Lifecycle
+
+### 3.1 Store
+
+Upload compiled WASM bytecode to the runtime. Returns a **code ID** (content-addressed hash of the bytecode). The same bytecode is stored only once.
+
+```
+StoreCode(wasm []byte) -> codeID
+```
+
+### 3.2 Instantiate
+
+Create a new contract instance from a stored code ID. Assigns a unique address, initializes storage, and calls the contract's `instantiate` entry point with the provided init message.
+
+```
+Instantiate(codeID, initMsg []byte, label string, funds Coins) -> contractAddress
+```
+
+The caller may attach YELLOW tokens (`funds`) that are transferred to the new contract's balance.
+
+### 3.3 Execute (Call)
+
+Invoke a contract function by sending calldata to a contract address.
+
+```
+Execute(contractAddress, calldata []byte, funds Coins) -> result []byte
+```
+
+The caller may attach YELLOW tokens. The contract reads calldata, performs logic, reads/writes storage, and returns a result or error.
+
+### 3.4 Query
+
+Read-only call that does not modify state. No gas cost to the caller (but internally metered to prevent abuse).
+
+```
+Query(contractAddress, queryMsg []byte) -> result []byte
+```
+
+## 4. Storage
+
+### 4.1 Model
+
+Each contract has isolated key-value storage. Keys and values are arbitrary byte slices.
+
+| Operation | Signature                                  |
+|-----------|--------------------------------------------|
+| Get       | `storage_get(key []byte) -> value []byte`  |
+| Set       | `storage_set(key []byte, value []byte)`    |
+| Delete    | `storage_delete(key []byte)`               |
+| Range     | `storage_range(start, end []byte, order) -> iterator` |
+
+### 4.2 Adapter Interface
+
+Storage is abstracted behind an adapter interface to support multiple backends.
+
+```go
+type StorageAdapter interface {
+    Get(contractAddr Address, key []byte) ([]byte, error)
+    Set(contractAddr Address, key []byte, value []byte) error
+    Delete(contractAddr Address, key []byte) error
+    Range(contractAddr Address, start, end []byte, order Order) (Iterator, error)
+    Close() error
+}
+```
+
+Initial implementation: **SQLite** (one table per contract, or a single table with composite keys).
+
+## 5. Host Functions
+
+CosmWasm-compatible host imports provided by NitroVM. All data crosses the WASM boundary via `Region` structs in linear memory (offset, capacity, length).
+
+### 5.1 Storage
+
+- `env.db_read(key_ptr) -> val_ptr`
+- `env.db_write(key_ptr, val_ptr)`
+- `env.db_remove(key_ptr)`
+- `env.db_scan(start_ptr, end_ptr, order) -> iterator_id`
+- `env.db_next(iterator_id) -> kv_pair_ptr`
+
+### 5.2 Address Handling
+
+- `env.addr_validate(addr_ptr) -> u32`
+- `env.addr_canonicalize(human_ptr, canonical_ptr) -> u32`
+- `env.addr_humanize(canonical_ptr, human_ptr) -> u32`
+
+### 5.3 Crypto
+
+- `env.secp256k1_verify(msg_hash_ptr, sig_ptr, pubkey_ptr) -> u32`
+- `env.secp256k1_recover_pubkey(msg_hash_ptr, sig_ptr, recovery_param) -> u64`
+- `env.ed25519_verify(msg_ptr, sig_ptr, pubkey_ptr) -> u32`
+- `env.ed25519_batch_verify(msgs_ptr, sigs_ptr, pubkeys_ptr) -> u32`
+
+### 5.4 Chain Queries
+
+- `env.query_chain(request_ptr) -> response_ptr` — Query chain state (balances, other contracts)
+
+### 5.5 Debug
+
+- `env.debug(msg_ptr)` — Print debug message (disabled in production)
+- `env.abort(msg_ptr, msg_len, file_ptr, file_len)` — Abort execution with error
+
+## 6. Contract ABI
+
+Contracts are written in Rust using the [cosmwasm-std](https://crates.io/crates/cosmwasm-std) crate and compiled to `wasm32-unknown-unknown`.
+
+Contracts must export the following CosmWasm entry points:
+
+```
+instantiate(env_ptr, info_ptr, msg_ptr) -> result_ptr
+execute(env_ptr, info_ptr, msg_ptr) -> result_ptr
+query(env_ptr, msg_ptr) -> result_ptr
+allocate(size) -> ptr
+deallocate(ptr)
+```
+
+- `env_ptr` — block height, timestamp, contract address
+- `info_ptr` — sender address, attached funds
+- `msg_ptr` — JSON-encoded contract message
+
+`allocate`/`deallocate` are used by the host to manage memory regions for passing data across the WASM boundary.
+
+## 7. Building Contracts
+
+### 7.1 Prerequisites
+
+- **Rust** with the `wasm32-unknown-unknown` target:
+  ```
+  rustup target add wasm32-unknown-unknown
+  ```
+- **wasm-opt** from [Binaryen](https://github.com/WebAssembly/binaryen) (required post-processing step):
+  ```
+  brew install binaryen      # macOS
+  apt install binaryen        # Debian/Ubuntu
+  ```
+
+### 7.2 Contract Structure
+
+A minimal contract lives under `contracts/<name>/` with this layout:
+
+```
+contracts/<name>/
+├── .cargo/
+│   └── config.toml          # WASM linker flags
+├── Cargo.toml
+└── src/
+    ├── lib.rs                # Re-exports modules
+    ├── msg.rs                # InstantiateMsg, ExecuteMsg, QueryMsg, responses
+    ├── state.rs              # Storage helpers (raw cosmwasm or cw-storage-plus)
+    ├── error.rs              # ContractError enum
+    └── contract.rs           # Entry points: instantiate, execute, query
+```
+
+### 7.3 Cargo.toml
+
+```toml
+[package]
+name = "<contract-name>"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cosmwasm-std = { version = "2", default-features = false, features = ["std"] }
+cosmwasm-schema = "2"
+schemars = "0.8"
+serde = { version = "1", default-features = false, features = ["derive"] }
+thiserror = "2"
+
+[profile.release]
+opt-level = "z"
+debug = false
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = true
+```
+
+Key settings:
+- `crate-type = ["cdylib"]` — produces a WASM module with the correct exports.
+- `opt-level = "z"` + `lto = true` + `strip = true` — minimizes binary size.
+- `panic = "abort"` — avoids unwinding machinery that bloats WASM.
+
+### 7.4 Cargo Config
+
+Place in `contracts/<name>/.cargo/config.toml`:
+
+```toml
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-s"]
+```
+
+### 7.5 Build & Post-Process
+
+**Step 1 — Compile to WASM:**
+
+```
+cargo build --release --target wasm32-unknown-unknown \
+  --manifest-path contracts/<name>/Cargo.toml
+```
+
+Output: `contracts/<name>/target/wasm32-unknown-unknown/release/<name>.wasm`
+
+**Step 2 — Lower bulk-memory operations:**
+
+wasmvm's wasmer engine does not support WebAssembly bulk-memory instructions (`memory.copy`, `memory.fill`). Rust 1.82+ emits these by default for `wasm32-unknown-unknown`. Use `wasm-opt` to lower them to MVP-compatible loops:
+
+```
+wasm-opt \
+  --enable-bulk-memory --enable-sign-ext --enable-mutable-globals \
+  --llvm-memory-copy-fill-lowering \
+  -Oz \
+  <input>.wasm -o <output>.wasm
+```
+
+- `--enable-bulk-memory` — allows wasm-opt to parse the input containing bulk-memory ops.
+- `--llvm-memory-copy-fill-lowering` — replaces `memory.copy`/`memory.fill` with scalar loops and disables the bulk-memory feature flag in the output.
+- `-Oz` — optimizes for size.
+
+**Both steps combined (Makefile):**
+
+```make
+build-contract:
+	cargo build --release --target wasm32-unknown-unknown \
+	  --manifest-path contracts/<name>/Cargo.toml
+	wasm-opt --enable-bulk-memory --enable-sign-ext --enable-mutable-globals \
+	  --llvm-memory-copy-fill-lowering -Oz \
+	  contracts/<name>/target/wasm32-unknown-unknown/release/<name>.wasm \
+	  -o contracts/<name>/target/wasm32-unknown-unknown/release/<name>.wasm
+```
+
+### 7.6 Verification
+
+Load the WASM into NitroVM via `StoreCode`. If the binary still contains unsupported instructions, `StoreCode` returns a validation error. A successful store confirms the contract is ready for instantiation.
+
+## 8. Future Work
+
+- Cross-contract calls via `WasmMsg::Execute` / `WasmQuery::Smart`
+- Events/logs system
+- Contract migration and admin controls
+- Additional storage backends (RocksDB, in-memory)
+- IBC support for cross-chain messaging
+- Block context (chain ID)

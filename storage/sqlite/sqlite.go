@@ -1,0 +1,167 @@
+// Package sqlite implements nitrovm.StorageAdapter backed by SQLite.
+package sqlite
+
+import (
+	"database/sql"
+	"fmt"
+	"sync"
+
+	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/layer-3/nitrovm"
+)
+
+// Store implements nitrovm.StorageAdapter backed by SQLite.
+type Store struct {
+	db *sql.DB
+	mu sync.RWMutex
+}
+
+// New opens (or creates) a SQLite database at path for contract storage.
+func New(path string) (*Store, error) {
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL")
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS contract_storage (
+		contract_addr BLOB NOT NULL,
+		key BLOB NOT NULL,
+		value BLOB NOT NULL,
+		PRIMARY KEY (contract_addr, key)
+	)`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create table: %w", err)
+	}
+
+	return &Store{db: db}, nil
+}
+
+func (s *Store) Get(contractAddr nitrovm.Address, key []byte) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var value []byte
+	err := s.db.QueryRow(
+		"SELECT value FROM contract_storage WHERE contract_addr = ? AND key = ?",
+		contractAddr[:], key,
+	).Scan(&value)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return value, err
+}
+
+func (s *Store) Set(contractAddr nitrovm.Address, key, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO contract_storage (contract_addr, key, value) VALUES (?, ?, ?)",
+		contractAddr[:], key, value,
+	)
+	return err
+}
+
+func (s *Store) Delete(contractAddr nitrovm.Address, key []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"DELETE FROM contract_storage WHERE contract_addr = ? AND key = ?",
+		contractAddr[:], key,
+	)
+	return err
+}
+
+func (s *Store) Range(contractAddr nitrovm.Address, start, end []byte, order nitrovm.Order) (nitrovm.StorageIterator, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	dir := "ASC"
+	if order == nitrovm.Descending {
+		dir = "DESC"
+	}
+
+	var rows *sql.Rows
+	var err error
+
+	switch {
+	case start == nil && end == nil:
+		rows, err = s.db.Query(
+			fmt.Sprintf("SELECT key, value FROM contract_storage WHERE contract_addr = ? ORDER BY key %s", dir),
+			contractAddr[:],
+		)
+	case end == nil:
+		rows, err = s.db.Query(
+			fmt.Sprintf("SELECT key, value FROM contract_storage WHERE contract_addr = ? AND key >= ? ORDER BY key %s", dir),
+			contractAddr[:], start,
+		)
+	case start == nil:
+		rows, err = s.db.Query(
+			fmt.Sprintf("SELECT key, value FROM contract_storage WHERE contract_addr = ? AND key < ? ORDER BY key %s", dir),
+			contractAddr[:], end,
+		)
+	default:
+		rows, err = s.db.Query(
+			fmt.Sprintf("SELECT key, value FROM contract_storage WHERE contract_addr = ? AND key >= ? AND key < ? ORDER BY key %s", dir),
+			contractAddr[:], start, end,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return loadIterator(rows)
+}
+
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+// sliceIterator pre-loads all results into memory to avoid holding open DB cursors.
+type sliceIterator struct {
+	pairs []kvPair
+	pos   int
+}
+
+type kvPair struct {
+	key   []byte
+	value []byte
+}
+
+func loadIterator(rows *sql.Rows) (*sliceIterator, error) {
+	defer rows.Close()
+	var pairs []kvPair
+	for rows.Next() {
+		var k, v []byte
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		pairs = append(pairs, kvPair{key: k, value: v})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return &sliceIterator{pairs: pairs}, nil
+}
+
+func (it *sliceIterator) Valid() bool { return it.pos < len(it.pairs) }
+func (it *sliceIterator) Next()      { it.pos++ }
+
+func (it *sliceIterator) Key() []byte {
+	if !it.Valid() {
+		return nil
+	}
+	return it.pairs[it.pos].key
+}
+
+func (it *sliceIterator) Value() []byte {
+	if !it.Valid() {
+		return nil
+	}
+	return it.pairs[it.pos].value
+}
+
+func (it *sliceIterator) Close() error { return nil }
