@@ -120,6 +120,30 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// Savepoint creates a named SQLite savepoint for transactional rollback.
+func (s *Store) Savepoint(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("SAVEPOINT " + name)
+	return err
+}
+
+// RollbackTo rolls back to a previously created savepoint.
+func (s *Store) RollbackTo(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("ROLLBACK TO " + name)
+	return err
+}
+
+// ReleaseSavepoint releases a savepoint without rolling back.
+func (s *Store) ReleaseSavepoint(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec("RELEASE SAVEPOINT " + name)
+	return err
+}
+
 // sliceIterator pre-loads all results into memory to avoid holding open DB cursors.
 type sliceIterator struct {
 	pairs []kvPair

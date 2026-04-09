@@ -2,6 +2,7 @@ package nitrovm
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	cosmwasm "github.com/CosmWasm/wasmvm/v2"
@@ -148,6 +149,8 @@ func testVMInternal(t *testing.T) *NitroVM {
 		accounts:  make(map[Address]*Account),
 		contracts: make(map[Address]*contractMeta),
 		codes:     make(map[string]cosmwasm.Checksum),
+		codeBySeq: make(map[uint64]cosmwasm.Checksum),
+		seqByCode: make(map[string]uint64),
 	}
 	return vm
 }
@@ -281,5 +284,103 @@ func TestDispatchUnsupportedMsg(t *testing.T) {
 	}
 	if !errors.Is(err, ErrUnsupportedMsg) {
 		t.Errorf("error = %v, want ErrUnsupportedMsg", err)
+	}
+}
+
+func TestCodeSequentialIDs(t *testing.T) {
+	vm := testVMInternal(t)
+
+	// Simulate two different codes being stored.
+	checksum1 := cosmwasm.Checksum([]byte("abcdef1234567890abcdef1234567890"))
+	checksum2 := cosmwasm.Checksum([]byte("ffffffffffffffffffffffffffffffff"))
+	hex1 := "6162636465663132333435363738393061626364656631323334353637383930"
+	hex2 := "6666666666666666666666666666666666666666666666666666666666666666"
+
+	vm.mu.Lock()
+	vm.codes[hex1] = checksum1
+	vm.codeSeq++
+	vm.codeBySeq[vm.codeSeq] = checksum1
+	vm.seqByCode[hex1] = vm.codeSeq
+	vm.codes[hex2] = checksum2
+	vm.codeSeq++
+	vm.codeBySeq[vm.codeSeq] = checksum2
+	vm.seqByCode[hex2] = vm.codeSeq
+	vm.mu.Unlock()
+
+	// Verify sequential IDs.
+	seq1, ok := vm.GetCodeSeq(hex1)
+	if !ok || seq1 != 1 {
+		t.Errorf("code1 seq = %d, ok = %v; want 1, true", seq1, ok)
+	}
+	seq2, ok := vm.GetCodeSeq(hex2)
+	if !ok || seq2 != 2 {
+		t.Errorf("code2 seq = %d, ok = %v; want 2, true", seq2, ok)
+	}
+
+	// Non-existent code.
+	_, ok = vm.GetCodeSeq("0000000000000000000000000000000000000000000000000000000000000000")
+	if ok {
+		t.Error("expected ok=false for non-existent code")
+	}
+}
+
+func TestDispatchWasmInstantiateCodeNotFound(t *testing.T) {
+	vm := testVMInternal(t)
+	contract, _ := HexToAddress("0x0000000000000000000000000000000000000aaa")
+
+	msgs := []wasmvmtypes.SubMsg{
+		{
+			ID: 1,
+			Msg: wasmvmtypes.CosmosMsg{
+				Wasm: &wasmvmtypes.WasmMsg{
+					Instantiate: &wasmvmtypes.InstantiateMsg{
+						CodeID: 999,
+						Msg:    []byte(`{}`),
+						Label:  "test",
+					},
+				},
+			},
+			ReplyOn: wasmvmtypes.ReplyNever,
+		},
+	}
+
+	_, err := vm.dispatchMessages(contract, msgs, 1_000_000, 0)
+	if err == nil {
+		t.Fatal("expected error for unknown code_id")
+	}
+	if !strings.Contains(err.Error(), "code_id 999 not found") {
+		t.Errorf("error = %v, want 'code_id 999 not found'", err)
+	}
+}
+
+func TestNonceValidation(t *testing.T) {
+	vm := testVMInternal(t)
+	sender, _ := HexToAddress("0x0000000000000000000000000000000000000001")
+	contract, _ := HexToAddress("0x0000000000000000000000000000000000000002")
+
+	// Set sender nonce to 5.
+	vm.SetNonce(sender, 5)
+
+	// Execute with wrong nonce should fail before touching wasmvm.
+	wrongNonce := uint64(3)
+	_, err := vm.Execute(contract, sender, []byte(`{}`), nil, 1_000_000, &wrongNonce)
+	if err == nil {
+		t.Fatal("expected ErrInvalidNonce")
+	}
+	if !errors.Is(err, ErrInvalidNonce) {
+		t.Errorf("error = %v, want ErrInvalidNonce", err)
+	}
+
+	// Execute with nil nonce should pass nonce check (and fail later on missing contract).
+	_, err = vm.Execute(contract, sender, []byte(`{}`), nil, 1_000_000, nil)
+	if !errors.Is(err, ErrContractNotFound) {
+		t.Errorf("nil nonce should skip validation; error = %v, want ErrContractNotFound", err)
+	}
+
+	// Instantiate with wrong nonce.
+	wrongNonce = uint64(0)
+	_, err = vm.Instantiate([]byte("nonexistent"), sender, []byte(`{}`), "test", nil, 1_000_000, &wrongNonce)
+	if !errors.Is(err, ErrInvalidNonce) {
+		t.Errorf("error = %v, want ErrInvalidNonce", err)
 	}
 }

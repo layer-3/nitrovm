@@ -27,6 +27,12 @@ type NitroVM struct {
 	contracts map[Address]*contractMeta
 	codes     map[string]cosmwasm.Checksum // hex(checksum) -> checksum
 
+	// Sequential code IDs for WasmMsg::Instantiate compatibility.
+	// CosmWasm contracts reference codes by uint64 sequence number.
+	codeSeq   uint64
+	codeBySeq map[uint64]cosmwasm.Checksum // seq -> checksum
+	seqByCode map[string]uint64            // hex(checksum) -> seq
+
 	blockHeight uint64
 	blockTime   uint64 // unix nanoseconds
 
@@ -55,28 +61,47 @@ func New(cfg Config, storage StorageAdapter) (*NitroVM, error) {
 		accounts:    make(map[Address]*Account),
 		contracts:   make(map[Address]*contractMeta),
 		codes:       make(map[string]cosmwasm.Checksum),
+		codeBySeq:   make(map[uint64]cosmwasm.Checksum),
+		seqByCode:   make(map[string]uint64),
 		blockHeight: 1,
 		blockTime:   uint64(time.Now().UnixNano()),
 	}, nil
 }
 
-// StoreCode uploads WASM bytecode. Returns the code ID (checksum).
-func (n *NitroVM) StoreCode(code []byte) ([]byte, error) {
+// StoreCode uploads WASM bytecode. Returns the code ID (checksum) and gas used.
+// If sender and nonce are non-nil, validates and increments the sender's nonce.
+func (n *NitroVM) StoreCode(code []byte, sender *Address, nonce *uint64) ([]byte, uint64, error) {
+	if nonce != nil && sender != nil {
+		if expected := n.GetNonce(*sender); *nonce != expected {
+			return nil, 0, fmt.Errorf("%w: got %d, expected %d", ErrInvalidNonce, *nonce, expected)
+		}
+	}
+
 	// wasmvm charges 420_000 gas per byte for compilation
-	gasLimit := uint64(len(code)) * 420_000
-	checksum, _, err := n.vm.StoreCode(code, gasLimit)
+	gasLimit := uint64(len(code)) * GasCostStoreCodePerByte
+	checksum, gasUsed, err := n.vm.StoreCode(code, gasLimit)
 	if err != nil {
-		return nil, fmt.Errorf("store code: %w", err)
+		return nil, 0, fmt.Errorf("store code: %w", err)
 	}
 
 	n.mu.Lock()
-	n.codes[hex.EncodeToString(checksum)] = checksum
+	hexID := hex.EncodeToString(checksum)
+	n.codes[hexID] = checksum
+	if _, exists := n.seqByCode[hexID]; !exists {
+		n.codeSeq++
+		n.codeBySeq[n.codeSeq] = checksum
+		n.seqByCode[hexID] = n.codeSeq
+	}
+	if sender != nil && nonce != nil {
+		n.getOrCreateAccount(*sender).Nonce++
+	}
 	n.mu.Unlock()
 
-	return []byte(checksum), nil
+	return []byte(checksum), gasUsed, nil
 }
 
 // Instantiate creates a new contract instance from a stored code ID.
+// If nonce is non-nil, it must match the sender's current nonce.
 func (n *NitroVM) Instantiate(
 	codeID []byte,
 	sender Address,
@@ -84,7 +109,13 @@ func (n *NitroVM) Instantiate(
 	label string,
 	funds []wasmvmtypes.Coin,
 	gasLimit uint64,
+	nonce *uint64,
 ) (*InstantiateResult, error) {
+	if nonce != nil {
+		if expected := n.GetNonce(sender); *nonce != expected {
+			return nil, fmt.Errorf("%w: got %d, expected %d", ErrInvalidNonce, *nonce, expected)
+		}
+	}
 	n.mu.Lock()
 	checksum, ok := n.codes[hex.EncodeToString(codeID)]
 	if !ok {
@@ -119,6 +150,11 @@ func (n *NitroVM) Instantiate(
 		return nil, fmt.Errorf("%w: %s", ErrContractError, result.Err)
 	}
 
+	// Increment sender nonce on successful instantiation.
+	n.mu.Lock()
+	n.getOrCreateAccount(sender).Nonce++
+	n.mu.Unlock()
+
 	res := &InstantiateResult{
 		ContractAddress: addr,
 		GasUsed:         gasUsed,
@@ -132,12 +168,19 @@ func (n *NitroVM) Instantiate(
 }
 
 // Execute calls a contract function.
+// If nonce is non-nil, it must match the sender's current nonce.
 func (n *NitroVM) Execute(
 	contract, sender Address,
 	msg []byte,
 	funds []wasmvmtypes.Coin,
 	gasLimit uint64,
+	nonce *uint64,
 ) (*ExecuteResult, error) {
+	if nonce != nil {
+		if expected := n.GetNonce(sender); *nonce != expected {
+			return nil, fmt.Errorf("%w: got %d, expected %d", ErrInvalidNonce, *nonce, expected)
+		}
+	}
 	return n.executeInternal(contract, sender, msg, funds, gasLimit, 0)
 }
 
@@ -348,6 +391,21 @@ func (n *NitroVM) SetNonce(addr Address, nonce uint64) {
 	n.getOrCreateAccount(addr).Nonce = nonce
 }
 
+// GetCodeSeq returns the sequential code ID for a given hex checksum.
+func (n *NitroVM) GetCodeSeq(hexCodeID string) (uint64, bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	seq, ok := n.seqByCode[hexCodeID]
+	return seq, ok
+}
+
+// SetCodeSeq restores the sequential code ID counter.
+func (n *NitroVM) SetCodeSeq(seq uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.codeSeq = seq
+}
+
 // maxDispatchDepth limits recursive sub-message dispatch to prevent infinite loops.
 const maxDispatchDepth = 10
 
@@ -401,8 +459,29 @@ func (n *NitroVM) dispatchMessages(
 			}
 			events = append(events, subRes.Events...)
 
+		case msg.Wasm != nil && msg.Wasm.Instantiate != nil:
+			imsg := msg.Wasm.Instantiate
+			n.mu.RLock()
+			checksum, ok := n.codeBySeq[imsg.CodeID]
+			n.mu.RUnlock()
+			if !ok {
+				return events, fmt.Errorf("dispatch wasm instantiate: code_id %d not found", imsg.CodeID)
+			}
+			res, err := n.Instantiate([]byte(checksum), contractAddr, imsg.Msg, imsg.Label, toCoins(imsg.Funds), gasLimit, nil)
+			if err != nil {
+				return events, fmt.Errorf("dispatch wasm instantiate: %w", err)
+			}
+			events = append(events, wasmvmtypes.Event{
+				Type: "instantiate",
+				Attributes: wasmvmtypes.Array[wasmvmtypes.EventAttribute]{
+					{Key: "_contract_address", Value: res.ContractAddress.Hex()},
+					{Key: "code_id", Value: fmt.Sprintf("%d", imsg.CodeID)},
+				},
+			})
+			events = append(events, res.Events...)
+
 		default:
-			return events, fmt.Errorf("%w: only bank.send and wasm.execute are supported", ErrUnsupportedMsg)
+			return events, fmt.Errorf("%w: only bank.send, wasm.execute, and wasm.instantiate are supported", ErrUnsupportedMsg)
 		}
 	}
 	return events, nil
@@ -423,6 +502,97 @@ func coinString(coins wasmvmtypes.Array[wasmvmtypes.Coin]) string {
 		s += c.Amount + c.Denom
 	}
 	return s
+}
+
+// DeductGasFee deducts gas_used * gas_price from the sender's balance.
+// Returns ErrInsufficientFunds if the sender cannot afford the fee.
+func (n *NitroVM) DeductGasFee(sender Address, gasUsed, gasPrice uint64) error {
+	if gasPrice == 0 {
+		return nil
+	}
+	fee := NewAmount(gasUsed).Mul(NewAmount(gasPrice))
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	acct := n.getOrCreateAccount(sender)
+	newBal, err := acct.Balance.Sub(fee)
+	if err != nil {
+		return ErrInsufficientFunds
+	}
+	acct.Balance = newBal
+	return nil
+}
+
+// ChainID returns the configured chain identifier.
+func (n *NitroVM) ChainID() string { return n.chainID }
+
+// VMSnapshot holds a deep copy of mutable VM state for simulate/rollback.
+type VMSnapshot struct {
+	accounts      map[Address]*Account
+	contracts     map[Address]*contractMeta
+	codes         map[string]cosmwasm.Checksum
+	codeSeq       uint64
+	codeBySeq     map[uint64]cosmwasm.Checksum
+	seqByCode     map[string]uint64
+	instanceCount uint64
+	blockHeight   uint64
+	blockTime     uint64
+}
+
+// Snapshot captures the current mutable state. Caller must hold n.mu.
+func (n *NitroVM) Snapshot() VMSnapshot {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	accts := make(map[Address]*Account, len(n.accounts))
+	for k, v := range n.accounts {
+		cp := *v
+		cp.Balance = v.Balance // Amount wraps *big.Int, copy the struct
+		accts[k] = &cp
+	}
+	contracts := make(map[Address]*contractMeta, len(n.contracts))
+	for k, v := range n.contracts {
+		cp := *v
+		contracts[k] = &cp
+	}
+	codes := make(map[string]cosmwasm.Checksum, len(n.codes))
+	for k, v := range n.codes {
+		codes[k] = v
+	}
+	codeBySeq := make(map[uint64]cosmwasm.Checksum, len(n.codeBySeq))
+	for k, v := range n.codeBySeq {
+		codeBySeq[k] = v
+	}
+	seqByCode := make(map[string]uint64, len(n.seqByCode))
+	for k, v := range n.seqByCode {
+		seqByCode[k] = v
+	}
+
+	return VMSnapshot{
+		accounts:      accts,
+		contracts:     contracts,
+		codes:         codes,
+		codeSeq:       n.codeSeq,
+		codeBySeq:     codeBySeq,
+		seqByCode:     seqByCode,
+		instanceCount: n.instanceCount,
+		blockHeight:   n.blockHeight,
+		blockTime:     n.blockTime,
+	}
+}
+
+// Restore replaces mutable state from a snapshot.
+func (n *NitroVM) Restore(snap VMSnapshot) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.accounts = snap.accounts
+	n.contracts = snap.contracts
+	n.codes = snap.codes
+	n.codeSeq = snap.codeSeq
+	n.codeBySeq = snap.codeBySeq
+	n.seqByCode = snap.seqByCode
+	n.instanceCount = snap.instanceCount
+	n.blockHeight = snap.blockHeight
+	n.blockTime = snap.blockTime
 }
 
 // Close releases all VM and storage resources.

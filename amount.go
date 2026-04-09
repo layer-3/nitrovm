@@ -67,6 +67,11 @@ func (a Amount) Sub(b Amount) (Amount, error) {
 	return Amount{v: result}, nil
 }
 
+// Mul returns a * b.
+func (a Amount) Mul(b Amount) Amount {
+	return Amount{v: new(big.Int).Mul(a.val(), b.val())}
+}
+
 // Cmp compares a and b: -1 if a < b, 0 if a == b, +1 if a > b.
 func (a Amount) Cmp(b Amount) int {
 	return a.val().Cmp(b.val())

@@ -101,16 +101,18 @@ Supported message types:
 
 | Message             | Description                                      |
 |---------------------|--------------------------------------------------|
-| `BankMsg::Send`     | Transfer YELLOW tokens from the contract to an address |
-| `WasmMsg::Execute`  | Call another contract's `execute` entry point     |
+| `BankMsg::Send`        | Transfer YELLOW tokens from the contract to an address |
+| `WasmMsg::Execute`     | Call another contract's `execute` entry point     |
+| `WasmMsg::Instantiate` | Spawn a new contract instance from a stored code ID |
 
 The sender of a dispatched sub-message is the calling contract's address. Sub-messages may themselves return further sub-messages, enabling chains of cross-contract calls.
+
+`WasmMsg::Instantiate` references codes by sequential uint64 ID (assigned in upload order), matching the CosmWasm convention. The newly created contract address is emitted in an `instantiate` event.
 
 **Recursion limit:** dispatch depth is capped at **10** to prevent infinite loops. Exceeding this limit aborts the transaction.
 
 **Not yet supported:**
 
-- `WasmMsg::Instantiate` — spawning new contracts from a contract
 - `WasmMsg::Migrate` — migrating contracts
 - `ReplyOn` callbacks — contracts cannot react to the success or failure of their sub-messages
 - `SubMsg::id` / reply routing
@@ -165,6 +167,8 @@ CosmWasm-compatible host imports provided by NitroVM. All data crosses the WASM 
 - `env.addr_humanize(canonical_ptr, human_ptr) -> u32`
 
 ### 5.3 Crypto
+
+These functions are implemented natively by the CosmWasm VM (libwasmvm) via the `cosmwasm-crypto` crate. No Go-side implementation is required — the VM registers them as WASM imports automatically.
 
 - `env.secp256k1_verify(msg_hash_ptr, sig_ptr, pubkey_ptr) -> u32`
 - `env.secp256k1_recover_pubkey(msg_hash_ptr, sig_ptr, recovery_param) -> u64`
@@ -324,10 +328,89 @@ build-contract:
 
 Load the WASM into NitroVM via `StoreCode`. If the binary still contains unsupported instructions, `StoreCode` returns a validation error. A successful store confirms the contract is ready for instantiation.
 
-## 8. Future Work
+## 8. Transaction Signing
+
+### 8.1 Overview
+
+State-changing operations (store, instantiate, execute) support cryptographically signed transactions. The signer's address is derived from their secp256k1 public key — it is never passed explicitly.
+
+### 8.2 Signing Algorithm
+
+- **Curve:** secp256k1 ECDSA (same as Ethereum)
+- **Hash:** keccak256 (Ethereum-compatible, `sha3.NewLegacyKeccak256()`)
+- **Address derivation:** `keccak256(uncompressed_pubkey[1:])[12:]` — last 20 bytes of the hash of the 64-byte public key (without the `0x04` prefix)
+
+### 8.3 Transaction Envelope
+
+All transactions share a single RLP-encoded structure:
+
+| Field    | Type      | Description |
+|----------|-----------|-------------|
+| ChainID  | string    | Chain identifier for replay protection |
+| Nonce    | uint64    | Sender's sequential nonce |
+| GasLimit | uint64    | Maximum gas for this transaction |
+| GasPrice | uint64    | Price per unit of gas (in smallest YELLOW unit) |
+| Type     | uint8     | 1=Store, 2=Instantiate, 3=Execute |
+| Code     | bytes     | WASM bytecode (Store only) |
+| CodeID   | bytes     | Code hash (Instantiate only) |
+| Label    | string    | Contract label (Instantiate only) |
+| Contract | [20]byte  | Target contract address (Execute only) |
+| Msg      | bytes     | JSON message (Instantiate, Execute) |
+| Funds    | []Coin    | Attached funds as `[[denom, amount], ...]` |
+
+Fields irrelevant to the transaction type encode as zero-values.
+
+### 8.4 Signing Process
+
+1. RLP-encode the transaction fields in the order above
+2. Compute `hash = keccak256(rlp_bytes)`
+3. Sign `hash` with the sender's secp256k1 private key (compact format: V, R, S)
+4. Transmit as: `RLP(tx) || V (1 byte) || R (32 bytes) || S (32 bytes)`
+
+### 8.5 Server Verification
+
+The server detects signed requests by the presence of a `"tx"` field in the JSON body:
+
+```json
+{"tx": "<hex-encoded signed tx bytes>"}
+```
+
+Verification steps:
+1. Hex-decode and split into RLP bytes + signature (last 65 bytes)
+2. RLP-decode the transaction
+3. Recover the public key via `ecrecover(hash, V, R, S)`
+4. Derive address from recovered public key
+5. Validate chain ID matches server's chain
+6. Validate gas price >= server's `--min-gas-price`
+7. Nonce must match sender's current nonce (strict sequential)
+
+### 8.6 Gas Fees
+
+After successful execution, the gas fee is deducted from the signer's balance:
+
+```
+gas_fee = gas_used * gas_price
+```
+
+If the signer cannot afford the gas fee, the entire transaction is rolled back (using VM snapshot + storage savepoint). Gas price of 0 means no fee deduction.
+
+### 8.7 Nonce Rules
+
+- Every sender address has a sequential nonce starting at 0
+- Each signed transaction must include a nonce equal to the sender's current nonce
+- Nonce is incremented after successful execution (store, instantiate, or execute)
+- Replay attacks are prevented: re-submitting a transaction with a used nonce is rejected
+
+### 8.8 Key Management
+
+The CLI stores private keys as hex-encoded 32-byte files at `~/.nitrovm/key` (overridable via `--keyfile` flag or `NITRO_KEYFILE` env). Generate with `nitroctl keygen`.
+
+### 8.9 Legacy Mode
+
+When the server runs without `--require-sig`, both signed and unsigned requests are accepted. Unsigned requests use the legacy JSON format with an explicit `sender` field. When `--require-sig` is set, only signed requests are accepted for store, instantiate, and execute endpoints.
+
+## 9. Future Work
 
 - `ReplyOn` callbacks and sub-message reply routing
-- `WasmMsg::Instantiate` — spawn contracts from contracts
 - Contract migration and admin controls (`WasmMsg::Migrate`)
-- Additional storage backends (RocksDB, in-memory)
 - IBC support for cross-chain messaging

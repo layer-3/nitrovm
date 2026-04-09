@@ -6,7 +6,8 @@ const (
 	GasCostStorageRead  = 200
 	GasCostStorageWrite = 5000
 	GasCostHashPerByte  = 3
-	GasCostSigVerify    = 3000
+	GasCostSigVerify        = 3000
+	GasCostStoreCodePerByte = 420_000
 
 	DefaultGasLimit    = uint64(10_000_000)
 	DefaultMemoryLimit = uint32(256) // MB

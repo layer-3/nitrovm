@@ -1,6 +1,7 @@
 package nitrovm_test
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	wasmvmtypes "github.com/CosmWasm/wasmvm/v2/types"
 
 	"github.com/layer-3/nitrovm"
@@ -52,11 +54,11 @@ func loadTokenWASM(t *testing.T) []byte {
 func instantiateToken(t *testing.T, vm *nitrovm.NitroVM, creator nitrovm.Address, initMsg []byte) ([]byte, nitrovm.Address) {
 	t.Helper()
 	code := loadTokenWASM(t)
-	codeID, err := vm.StoreCode(code)
+	codeID, _, err := vm.StoreCode(code, nil, nil)
 	if err != nil {
 		t.Fatalf("StoreCode: %v", err)
 	}
-	res, err := vm.Instantiate(codeID, creator, initMsg, "token", nil, testingGasLimit)
+	res, err := vm.Instantiate(codeID, creator, initMsg, "token", nil, testingGasLimit, nil)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -165,7 +167,7 @@ func TestTokenTransfer(t *testing.T) {
 			"amount":    "250000",
 		},
 	})
-	_, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
+	_, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit, nil)
 	if err != nil {
 		t.Fatalf("transfer: %v", err)
 	}
@@ -197,7 +199,7 @@ func TestTokenTransferInsufficientFunds(t *testing.T) {
 			"amount":    "200",
 		},
 	})
-	_, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
+	_, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected error for insufficient funds")
 	}
@@ -230,7 +232,7 @@ func TestTokenTransferZeroAmount(t *testing.T) {
 			"amount":    "0",
 		},
 	})
-	_, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
+	_, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected error for zero amount")
 	}
@@ -275,7 +277,7 @@ func TestTokenMultipleTransfers(t *testing.T) {
 	msg1, _ := json.Marshal(map[string]any{
 		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "300"},
 	})
-	if _, err := vm.Execute(contract, alice, msg1, nil, testingGasLimit); err != nil {
+	if _, err := vm.Execute(contract, alice, msg1, nil, testingGasLimit, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -283,7 +285,7 @@ func TestTokenMultipleTransfers(t *testing.T) {
 	msg2, _ := json.Marshal(map[string]any{
 		"transfer": map[string]any{"recipient": charlie.Hex(), "amount": "200"},
 	})
-	if _, err := vm.Execute(contract, alice, msg2, nil, testingGasLimit); err != nil {
+	if _, err := vm.Execute(contract, alice, msg2, nil, testingGasLimit, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -291,7 +293,7 @@ func TestTokenMultipleTransfers(t *testing.T) {
 	msg3, _ := json.Marshal(map[string]any{
 		"transfer": map[string]any{"recipient": charlie.Hex(), "amount": "100"},
 	})
-	if _, err := vm.Execute(contract, bob, msg3, nil, testingGasLimit); err != nil {
+	if _, err := vm.Execute(contract, bob, msg3, nil, testingGasLimit, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -326,7 +328,7 @@ func TestExecuteOutOfGas(t *testing.T) {
 		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "100"},
 	})
 	// Gas limit of 1 should be far too low.
-	_, err := vm.Execute(contract, alice, execMsg, nil, 1)
+	_, err := vm.Execute(contract, alice, execMsg, nil, 1, nil)
 	if err == nil {
 		t.Fatal("expected out of gas error")
 	}
@@ -374,13 +376,13 @@ func TestInstantiateWithFunds(t *testing.T) {
 	})
 
 	code := loadTokenWASM(t)
-	codeID, err := vm.StoreCode(code)
+	codeID, _, err := vm.StoreCode(code, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	funds := []wasmvmtypes.Coin{{Denom: "YELLOW", Amount: "500"}}
-	res, err := vm.Instantiate(codeID, alice, initMsg, "token", funds, testingGasLimit)
+	res, err := vm.Instantiate(codeID, alice, initMsg, "token", funds, testingGasLimit, nil)
 	if err != nil {
 		t.Fatalf("Instantiate with funds: %v", err)
 	}
@@ -414,7 +416,7 @@ func TestExecuteWithFunds(t *testing.T) {
 		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "100"},
 	})
 	funds := []wasmvmtypes.Coin{{Denom: "YELLOW", Amount: "200"}}
-	_, err := vm.Execute(contract, alice, execMsg, funds, testingGasLimit)
+	_, err := vm.Execute(contract, alice, execMsg, funds, testingGasLimit, nil)
 	if err != nil {
 		t.Fatalf("execute with funds: %v", err)
 	}
@@ -448,7 +450,7 @@ func TestExecuteWithFundsInsufficientBalance(t *testing.T) {
 		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "100"},
 	})
 	funds := []wasmvmtypes.Coin{{Denom: "YELLOW", Amount: "100"}}
-	_, err := vm.Execute(contract, alice, execMsg, funds, testingGasLimit)
+	_, err := vm.Execute(contract, alice, execMsg, funds, testingGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected insufficient funds error")
 	}
@@ -475,7 +477,7 @@ func TestExecuteReturnsEvents(t *testing.T) {
 	execMsg, _ := json.Marshal(map[string]any{
 		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "100"},
 	})
-	res, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
+	res, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit, nil)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -516,12 +518,12 @@ func TestInstantiateReturnsEvents(t *testing.T) {
 	})
 
 	code := loadTokenWASM(t)
-	codeID, err := vm.StoreCode(code)
+	codeID, _, err := vm.StoreCode(code, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	res, err := vm.Instantiate(codeID, alice, initMsg, "token", nil, testingGasLimit)
+	res, err := vm.Instantiate(codeID, alice, initMsg, "token", nil, testingGasLimit, nil)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -556,7 +558,7 @@ func TestExecuteResultGasUsed(t *testing.T) {
 	execMsg, _ := json.Marshal(map[string]any{
 		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "100"},
 	})
-	res, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
+	res, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit, nil)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -593,5 +595,206 @@ func TestCrossContractQuery(t *testing.T) {
 	}
 	if bal := queryBalance(t, vm, contract2, alice.Hex()); bal != "2000" {
 		t.Errorf("contract2 alice = %s, want 2000", bal)
+	}
+}
+
+// --- Transaction Signing Tests ---
+
+func testKey(t *testing.T) *secp256k1.PrivateKey {
+	t.Helper()
+	// Hardhat account 0.
+	b, _ := hex.DecodeString("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
+	return secp256k1.PrivKeyFromBytes(b)
+}
+
+func TestSignedStoreInstantiateExecute(t *testing.T) {
+	vm := testVM(t)
+	key := testKey(t)
+	sender := nitrovm.DeriveAddress(key)
+
+	// Fund the sender for gas fees.
+	vm.SetBalance(sender, nitrovm.NewAmount(1_000_000_000))
+
+	// Signed store.
+	code := loadTokenWASM(t)
+	nonce := uint64(0)
+	codeID, gasUsed, err := vm.StoreCode(code, &sender, &nonce)
+	if err != nil {
+		t.Fatalf("signed store: %v", err)
+	}
+	if gasUsed == 0 {
+		t.Error("expected gas used > 0 for store")
+	}
+	// Nonce should have incremented.
+	if got := vm.GetNonce(sender); got != 1 {
+		t.Fatalf("nonce after store = %d, want 1", got)
+	}
+
+	// Signed instantiate.
+	initMsg, _ := json.Marshal(map[string]any{
+		"name": "Signed Token", "symbol": "SIG", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": sender.Hex(), "amount": "5000"},
+		},
+	})
+	nonce = 1
+	res, err := vm.Instantiate(codeID, sender, initMsg, "signed-token", nil, testingGasLimit, &nonce)
+	if err != nil {
+		t.Fatalf("signed instantiate: %v", err)
+	}
+	// Nonce should have incremented to 2.
+	if got := vm.GetNonce(sender); got != 2 {
+		t.Fatalf("nonce after instantiate = %d, want 2", got)
+	}
+
+	// Signed execute.
+	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000099")
+	execMsg, _ := json.Marshal(map[string]any{
+		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "200"},
+	})
+	nonce = 2
+	_, err = vm.Execute(res.ContractAddress, sender, execMsg, nil, testingGasLimit, &nonce)
+	if err != nil {
+		t.Fatalf("signed execute: %v", err)
+	}
+	// Nonce should have incremented to 3.
+	if got := vm.GetNonce(sender); got != 3 {
+		t.Fatalf("nonce after execute = %d, want 3", got)
+	}
+
+	// Verify transfer happened.
+	if bal := queryBalance(t, vm, res.ContractAddress, bob.Hex()); bal != "200" {
+		t.Errorf("bob balance = %s, want 200", bal)
+	}
+}
+
+func TestSignedNonceRejection(t *testing.T) {
+	vm := testVM(t)
+	key := testKey(t)
+	sender := nitrovm.DeriveAddress(key)
+
+	code := loadTokenWASM(t)
+	// Store with nonce 0 succeeds.
+	nonce := uint64(0)
+	_, _, err := vm.StoreCode(code, &sender, &nonce)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	// Try store with nonce 0 again (replay) — should fail.
+	nonce = 0
+	_, _, err = vm.StoreCode(code, &sender, &nonce)
+	if !errors.Is(err, nitrovm.ErrInvalidNonce) {
+		t.Fatalf("replay store: got %v, want ErrInvalidNonce", err)
+	}
+}
+
+func TestDeductGasFee(t *testing.T) {
+	vm := testVM(t)
+	key := testKey(t)
+	sender := nitrovm.DeriveAddress(key)
+
+	vm.SetBalance(sender, nitrovm.NewAmount(1_000_000))
+
+	// Deduct fee: 100 gas * 5 gas_price = 500
+	err := vm.DeductGasFee(sender, 100, 5)
+	if err != nil {
+		t.Fatalf("deduct gas fee: %v", err)
+	}
+	if bal := vm.GetBalance(sender); !bal.Equal(nitrovm.NewAmount(999_500)) {
+		t.Errorf("balance after fee = %s, want 999500", bal)
+	}
+
+	// Zero gas price should be a no-op.
+	err = vm.DeductGasFee(sender, 1000, 0)
+	if err != nil {
+		t.Fatalf("zero gas price: %v", err)
+	}
+	if bal := vm.GetBalance(sender); !bal.Equal(nitrovm.NewAmount(999_500)) {
+		t.Errorf("balance after zero-price fee = %s, want 999500", bal)
+	}
+}
+
+func TestDeductGasFeeInsufficientFunds(t *testing.T) {
+	vm := testVM(t)
+	key := testKey(t)
+	sender := nitrovm.DeriveAddress(key)
+
+	vm.SetBalance(sender, nitrovm.NewAmount(100))
+
+	// Deduct fee: 1000 gas * 1 gas_price = 1000 > 100 balance
+	err := vm.DeductGasFee(sender, 1000, 1)
+	if !errors.Is(err, nitrovm.ErrInsufficientFunds) {
+		t.Fatalf("got %v, want ErrInsufficientFunds", err)
+	}
+	// Balance unchanged.
+	if bal := vm.GetBalance(sender); !bal.Equal(nitrovm.NewAmount(100)) {
+		t.Errorf("balance should be unchanged, got %s", bal)
+	}
+}
+
+func TestSignAndRecoverRoundtrip(t *testing.T) {
+	key := testKey(t)
+	sender := nitrovm.DeriveAddress(key)
+
+	tx := &nitrovm.Transaction{
+		ChainID:  "nitro-test",
+		Nonce:    42,
+		GasLimit: 1_000_000,
+		GasPrice: 1,
+		Type:     nitrovm.TxExecute,
+		Contract: nitrovm.Address{0xaa, 0xbb},
+		Msg:      []byte(`{"test":true}`),
+	}
+
+	stx, err := nitrovm.SignTx(tx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Encode -> decode -> recover.
+	encoded, err := nitrovm.EncodeSignedTx(stx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := nitrovm.DecodeSignedTx(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := nitrovm.RecoverSender(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered != sender {
+		t.Fatalf("recovered %s, want %s", recovered.Hex(), sender.Hex())
+	}
+}
+
+func TestInstantiateIncrementsNonce(t *testing.T) {
+	vm := testVM(t)
+	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+
+	if got := vm.GetNonce(alice); got != 0 {
+		t.Fatalf("initial nonce = %d, want 0", got)
+	}
+
+	code := loadTokenWASM(t)
+	codeID, _, err := vm.StoreCode(code, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	initMsg, _ := json.Marshal(map[string]any{
+		"name": "Test", "symbol": "T", "decimals": 18,
+		"initial_balances": []map[string]any{},
+	})
+	_, err = vm.Instantiate(codeID, alice, initMsg, "test", nil, testingGasLimit, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Instantiate should now increment nonce.
+	if got := vm.GetNonce(alice); got != 1 {
+		t.Fatalf("nonce after instantiate = %d, want 1", got)
 	}
 }
