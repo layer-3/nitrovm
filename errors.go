@@ -10,4 +10,6 @@ var (
 	ErrInsufficientFunds = errors.New("insufficient funds")
 	ErrInvalidAddress    = errors.New("invalid address")
 	ErrContractError     = errors.New("contract error")
+	ErrMaxDispatchDepth  = errors.New("max sub-message dispatch depth exceeded")
+	ErrUnsupportedMsg    = errors.New("unsupported message type")
 )

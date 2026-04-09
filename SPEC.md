@@ -51,8 +51,18 @@ StoreCode(wasm []byte) -> codeID
 Create a new contract instance from a stored code ID. Assigns a unique address, initializes storage, and calls the contract's `instantiate` entry point with the provided init message.
 
 ```
-Instantiate(codeID, initMsg []byte, label string, funds Coins) -> contractAddress
+Instantiate(codeID, initMsg []byte, label string, funds Coins) -> InstantiateResult
 ```
+
+Returns:
+
+| Field           | Description                                 |
+|-----------------|---------------------------------------------|
+| ContractAddress | Deterministic address derived from creator, codeID, and instance counter |
+| GasUsed         | Gas consumed during instantiation           |
+| Data            | Optional binary data returned by the contract |
+| Attributes      | Key-value attributes emitted by the contract |
+| Events          | Typed events emitted by the contract        |
 
 The caller may attach YELLOW tokens (`funds`) that are transferred to the new contract's balance.
 
@@ -61,10 +71,19 @@ The caller may attach YELLOW tokens (`funds`) that are transferred to the new co
 Invoke a contract function by sending calldata to a contract address.
 
 ```
-Execute(contractAddress, calldata []byte, funds Coins) -> result []byte
+Execute(contractAddress, calldata []byte, funds Coins) -> ExecuteResult
 ```
 
-The caller may attach YELLOW tokens. The contract reads calldata, performs logic, reads/writes storage, and returns a result or error.
+Returns:
+
+| Field      | Description                                 |
+|------------|---------------------------------------------|
+| GasUsed    | Gas consumed during execution               |
+| Data       | Optional binary data returned by the contract |
+| Attributes | Key-value attributes emitted by the contract |
+| Events     | Typed events emitted by the contract        |
+
+The caller may attach YELLOW tokens. The contract reads calldata, performs logic, reads/writes storage, and returns a result or error. Any sub-messages returned in the contract response are dispatched after execution (see §3.5).
 
 ### 3.4 Query
 
@@ -73,6 +92,30 @@ Read-only call that does not modify state. No gas cost to the caller (but intern
 ```
 Query(contractAddress, queryMsg []byte) -> result []byte
 ```
+
+### 3.5 Sub-Message Dispatch
+
+Contracts communicate with other contracts and the runtime by returning **sub-messages** in their `Response`. After a contract's `execute` or `instantiate` entry point returns, NitroVM dispatches each sub-message in order.
+
+Supported message types:
+
+| Message             | Description                                      |
+|---------------------|--------------------------------------------------|
+| `BankMsg::Send`     | Transfer YELLOW tokens from the contract to an address |
+| `WasmMsg::Execute`  | Call another contract's `execute` entry point     |
+
+The sender of a dispatched sub-message is the calling contract's address. Sub-messages may themselves return further sub-messages, enabling chains of cross-contract calls.
+
+**Recursion limit:** dispatch depth is capped at **10** to prevent infinite loops. Exceeding this limit aborts the transaction.
+
+**Not yet supported:**
+
+- `WasmMsg::Instantiate` — spawning new contracts from a contract
+- `WasmMsg::Migrate` — migrating contracts
+- `ReplyOn` callbacks — contracts cannot react to the success or failure of their sub-messages
+- `SubMsg::id` / reply routing
+
+Events emitted by sub-calls are collected and appended to the parent execution result.
 
 ## 4. Storage
 
@@ -130,7 +173,15 @@ CosmWasm-compatible host imports provided by NitroVM. All data crosses the WASM 
 
 ### 5.4 Chain Queries
 
-- `env.query_chain(request_ptr) -> response_ptr` — Query chain state (balances, other contracts)
+- `env.query_chain(request_ptr) -> response_ptr` — Query chain state
+
+Supported query types:
+
+| Query                    | Description                                      |
+|--------------------------|--------------------------------------------------|
+| `BankQuery::Balance`     | Get balance of a single denom for an address     |
+| `BankQuery::AllBalances` | Get all YELLOW token balances for an address     |
+| `WasmQuery::Smart`       | Call another contract's `query` entry point (cross-contract read) |
 
 ### 5.5 Debug
 
@@ -275,9 +326,8 @@ Load the WASM into NitroVM via `StoreCode`. If the binary still contains unsuppo
 
 ## 8. Future Work
 
-- Cross-contract calls via `WasmMsg::Execute` / `WasmQuery::Smart`
-- Events/logs system
-- Contract migration and admin controls
+- `ReplyOn` callbacks and sub-message reply routing
+- `WasmMsg::Instantiate` — spawn contracts from contracts
+- Contract migration and admin controls (`WasmMsg::Migrate`)
 - Additional storage backends (RocksDB, in-memory)
 - IBC support for cross-chain messaging
-- Block context (chain ID)

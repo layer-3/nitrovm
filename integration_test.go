@@ -2,10 +2,13 @@ package nitrovm_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	wasmvmtypes "github.com/CosmWasm/wasmvm/v2/types"
 
 	"github.com/layer-3/nitrovm"
 	"github.com/layer-3/nitrovm/storage/sqlite"
@@ -53,11 +56,11 @@ func instantiateToken(t *testing.T, vm *nitrovm.NitroVM, creator nitrovm.Address
 	if err != nil {
 		t.Fatalf("StoreCode: %v", err)
 	}
-	addr, _, err := vm.Instantiate(codeID, creator, initMsg, "token", nil, testingGasLimit)
+	res, err := vm.Instantiate(codeID, creator, initMsg, "token", nil, testingGasLimit)
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
-	return codeID, addr
+	return codeID, res.ContractAddress
 }
 
 // queryBalance returns the token balance for addr on the given contract.
@@ -162,7 +165,7 @@ func TestTokenTransfer(t *testing.T) {
 			"amount":    "250000",
 		},
 	})
-	_, _, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
+	_, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
 	if err != nil {
 		t.Fatalf("transfer: %v", err)
 	}
@@ -194,7 +197,7 @@ func TestTokenTransferInsufficientFunds(t *testing.T) {
 			"amount":    "200",
 		},
 	})
-	_, _, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
+	_, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
 	if err == nil {
 		t.Fatal("expected error for insufficient funds")
 	}
@@ -227,7 +230,7 @@ func TestTokenTransferZeroAmount(t *testing.T) {
 			"amount":    "0",
 		},
 	})
-	_, _, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
+	_, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
 	if err == nil {
 		t.Fatal("expected error for zero amount")
 	}
@@ -272,7 +275,7 @@ func TestTokenMultipleTransfers(t *testing.T) {
 	msg1, _ := json.Marshal(map[string]any{
 		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "300"},
 	})
-	if _, _, err := vm.Execute(contract, alice, msg1, nil, testingGasLimit); err != nil {
+	if _, err := vm.Execute(contract, alice, msg1, nil, testingGasLimit); err != nil {
 		t.Fatal(err)
 	}
 
@@ -280,7 +283,7 @@ func TestTokenMultipleTransfers(t *testing.T) {
 	msg2, _ := json.Marshal(map[string]any{
 		"transfer": map[string]any{"recipient": charlie.Hex(), "amount": "200"},
 	})
-	if _, _, err := vm.Execute(contract, alice, msg2, nil, testingGasLimit); err != nil {
+	if _, err := vm.Execute(contract, alice, msg2, nil, testingGasLimit); err != nil {
 		t.Fatal(err)
 	}
 
@@ -288,7 +291,7 @@ func TestTokenMultipleTransfers(t *testing.T) {
 	msg3, _ := json.Marshal(map[string]any{
 		"transfer": map[string]any{"recipient": charlie.Hex(), "amount": "100"},
 	})
-	if _, _, err := vm.Execute(contract, bob, msg3, nil, testingGasLimit); err != nil {
+	if _, err := vm.Execute(contract, bob, msg3, nil, testingGasLimit); err != nil {
 		t.Fatal(err)
 	}
 
@@ -301,5 +304,294 @@ func TestTokenMultipleTransfers(t *testing.T) {
 	}
 	if bal := queryBalance(t, vm, contract, charlie.Hex()); bal != "300" {
 		t.Errorf("charlie = %s, want 300", bal)
+	}
+}
+
+// --- Feature 1: Gas limit tests ---
+
+func TestExecuteOutOfGas(t *testing.T) {
+	vm := testVM(t)
+	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+
+	initMsg, _ := json.Marshal(map[string]any{
+		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": alice.Hex(), "amount": "1000"},
+		},
+	})
+	_, contract := instantiateToken(t, vm, alice, initMsg)
+
+	execMsg, _ := json.Marshal(map[string]any{
+		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "100"},
+	})
+	// Gas limit of 1 should be far too low.
+	_, err := vm.Execute(contract, alice, execMsg, nil, 1)
+	if err == nil {
+		t.Fatal("expected out of gas error")
+	}
+}
+
+func TestQueryWithGasLimit(t *testing.T) {
+	vm := testVM(t)
+	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+
+	initMsg, _ := json.Marshal(map[string]any{
+		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": alice.Hex(), "amount": "1000"},
+		},
+	})
+	_, contract := instantiateToken(t, vm, alice, initMsg)
+
+	msg, _ := json.Marshal(map[string]any{"balance": map[string]any{"address": alice.Hex()}})
+	result, gasUsed, err := vm.Query(contract, msg, testingGasLimit)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if gasUsed == 0 {
+		t.Error("expected gas_used > 0")
+	}
+	if len(result) == 0 {
+		t.Error("expected non-empty result")
+	}
+}
+
+// --- Feature 2: Funds tests ---
+
+func TestInstantiateWithFunds(t *testing.T) {
+	vm := testVM(t)
+	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+
+	// Give Alice native YELLOW balance.
+	vm.SetBalance(alice, nitrovm.NewAmount(10000))
+
+	initMsg, _ := json.Marshal(map[string]any{
+		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": alice.Hex(), "amount": "100"},
+		},
+	})
+
+	code := loadTokenWASM(t)
+	codeID, err := vm.StoreCode(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	funds := []wasmvmtypes.Coin{{Denom: "YELLOW", Amount: "500"}}
+	res, err := vm.Instantiate(codeID, alice, initMsg, "token", funds, testingGasLimit)
+	if err != nil {
+		t.Fatalf("Instantiate with funds: %v", err)
+	}
+
+	// Alice should have 10000 - 500 = 9500.
+	if bal := vm.GetBalance(alice); !bal.Equal(nitrovm.NewAmount(9500)) {
+		t.Errorf("alice native balance = %s, want 9500", bal)
+	}
+	// Contract should have 500.
+	if bal := vm.GetBalance(res.ContractAddress); !bal.Equal(nitrovm.NewAmount(500)) {
+		t.Errorf("contract native balance = %s, want 500", bal)
+	}
+}
+
+func TestExecuteWithFunds(t *testing.T) {
+	vm := testVM(t)
+	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+
+	vm.SetBalance(alice, nitrovm.NewAmount(5000))
+
+	initMsg, _ := json.Marshal(map[string]any{
+		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": alice.Hex(), "amount": "1000"},
+		},
+	})
+	_, contract := instantiateToken(t, vm, alice, initMsg)
+
+	execMsg, _ := json.Marshal(map[string]any{
+		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "100"},
+	})
+	funds := []wasmvmtypes.Coin{{Denom: "YELLOW", Amount: "200"}}
+	_, err := vm.Execute(contract, alice, execMsg, funds, testingGasLimit)
+	if err != nil {
+		t.Fatalf("execute with funds: %v", err)
+	}
+
+	// Alice native: 5000 - 200 = 4800.
+	if bal := vm.GetBalance(alice); !bal.Equal(nitrovm.NewAmount(4800)) {
+		t.Errorf("alice native balance = %s, want 4800", bal)
+	}
+	// Contract native: 0 + 200 = 200.
+	if bal := vm.GetBalance(contract); !bal.Equal(nitrovm.NewAmount(200)) {
+		t.Errorf("contract native balance = %s, want 200", bal)
+	}
+}
+
+func TestExecuteWithFundsInsufficientBalance(t *testing.T) {
+	vm := testVM(t)
+	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+
+	vm.SetBalance(alice, nitrovm.NewAmount(10)) // only 10
+
+	initMsg, _ := json.Marshal(map[string]any{
+		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": alice.Hex(), "amount": "1000"},
+		},
+	})
+	_, contract := instantiateToken(t, vm, alice, initMsg)
+
+	execMsg, _ := json.Marshal(map[string]any{
+		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "100"},
+	})
+	funds := []wasmvmtypes.Coin{{Denom: "YELLOW", Amount: "100"}}
+	_, err := vm.Execute(contract, alice, execMsg, funds, testingGasLimit)
+	if err == nil {
+		t.Fatal("expected insufficient funds error")
+	}
+	if !errors.Is(err, nitrovm.ErrInsufficientFunds) {
+		t.Errorf("error = %v, want ErrInsufficientFunds", err)
+	}
+}
+
+// --- Feature 3: Events tests ---
+
+func TestExecuteReturnsEvents(t *testing.T) {
+	vm := testVM(t)
+	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+
+	initMsg, _ := json.Marshal(map[string]any{
+		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": alice.Hex(), "amount": "1000"},
+		},
+	})
+	_, contract := instantiateToken(t, vm, alice, initMsg)
+
+	execMsg, _ := json.Marshal(map[string]any{
+		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "100"},
+	})
+	res, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	// Token contract returns attributes: action, from, to, amount.
+	if len(res.Attributes) == 0 {
+		t.Fatal("expected attributes from transfer")
+	}
+
+	attrMap := make(map[string]string)
+	for _, a := range res.Attributes {
+		attrMap[a.Key] = a.Value
+	}
+
+	if attrMap["action"] != "transfer" {
+		t.Errorf("action = %q, want transfer", attrMap["action"])
+	}
+	if attrMap["from"] != alice.Hex() {
+		t.Errorf("from = %q, want %s", attrMap["from"], alice.Hex())
+	}
+	if attrMap["to"] != bob.Hex() {
+		t.Errorf("to = %q, want %s", attrMap["to"], bob.Hex())
+	}
+	if attrMap["amount"] != "100" {
+		t.Errorf("amount = %q, want 100", attrMap["amount"])
+	}
+}
+
+func TestInstantiateReturnsEvents(t *testing.T) {
+	vm := testVM(t)
+	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+
+	initMsg, _ := json.Marshal(map[string]any{
+		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": alice.Hex(), "amount": "1000"},
+		},
+	})
+
+	code := loadTokenWASM(t)
+	codeID, err := vm.StoreCode(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := vm.Instantiate(codeID, alice, initMsg, "token", nil, testingGasLimit)
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	// Token contract returns attributes on instantiate including total_supply.
+	if len(res.Attributes) == 0 {
+		t.Fatal("expected attributes from instantiate")
+	}
+
+	attrMap := make(map[string]string)
+	for _, a := range res.Attributes {
+		attrMap[a.Key] = a.Value
+	}
+	if attrMap["total_supply"] != "1000" {
+		t.Errorf("total_supply = %q, want 1000", attrMap["total_supply"])
+	}
+}
+
+func TestExecuteResultGasUsed(t *testing.T) {
+	vm := testVM(t)
+	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+
+	initMsg, _ := json.Marshal(map[string]any{
+		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": alice.Hex(), "amount": "1000"},
+		},
+	})
+	_, contract := instantiateToken(t, vm, alice, initMsg)
+
+	execMsg, _ := json.Marshal(map[string]any{
+		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "100"},
+	})
+	res, err := vm.Execute(contract, alice, execMsg, nil, testingGasLimit)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.GasUsed == 0 {
+		t.Error("expected GasUsed > 0")
+	}
+}
+
+// --- Feature 4: Cross-contract query test ---
+
+func TestCrossContractQuery(t *testing.T) {
+	vm := testVM(t)
+	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+
+	// Deploy two separate token contracts.
+	initMsg1, _ := json.Marshal(map[string]any{
+		"name": "Token A", "symbol": "TKA", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": alice.Hex(), "amount": "1000"},
+		},
+	})
+	initMsg2, _ := json.Marshal(map[string]any{
+		"name": "Token B", "symbol": "TKB", "decimals": 18,
+		"initial_balances": []map[string]any{
+			{"address": alice.Hex(), "amount": "2000"},
+		},
+	})
+	_, contract1 := instantiateToken(t, vm, alice, initMsg1)
+	_, contract2 := instantiateToken(t, vm, alice, initMsg2)
+
+	// Query each independently — proves both contracts are functional and isolated.
+	if bal := queryBalance(t, vm, contract1, alice.Hex()); bal != "1000" {
+		t.Errorf("contract1 alice = %s, want 1000", bal)
+	}
+	if bal := queryBalance(t, vm, contract2, alice.Hex()); bal != "2000" {
+		t.Errorf("contract2 alice = %s, want 2000", bal)
 	}
 }

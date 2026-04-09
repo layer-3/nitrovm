@@ -67,6 +67,22 @@ BOB_BAL=$($NITROCTL query "$CONTRACT" "{\"balance\":{\"address\":\"$BOB\"}}")
 echo "Bob: $BOB_BAL"
 echo "$BOB_BAL" | grep -q '"100"' || { echo "FAIL: expected Bob=100"; exit 1; }
 
+echo "=== Alice sends 5 micro payments (1 each) to Bob ==="
+for i in 1 2 3 4 5; do
+    $NITROCTL execute "$CONTRACT" "$ALICE" \
+        "{\"transfer\":{\"recipient\":\"$BOB\",\"amount\":\"1\"}}"
+    echo "  payment $i/5 sent"
+done
+
+# Alice: 900 - 5 = 895, Bob: 100 + 5 = 105
+ALICE_BAL=$($NITROCTL query "$CONTRACT" "{\"balance\":{\"address\":\"$ALICE\"}}")
+echo "Alice after micro payments: $ALICE_BAL"
+echo "$ALICE_BAL" | grep -q '"895"' || { echo "FAIL: expected Alice=895"; exit 1; }
+
+BOB_BAL=$($NITROCTL query "$CONTRACT" "{\"balance\":{\"address\":\"$BOB\"}}")
+echo "Bob after micro payments: $BOB_BAL"
+echo "$BOB_BAL" | grep -q '"105"' || { echo "FAIL: expected Bob=105"; exit 1; }
+
 echo "=== Query token info ==="
 INFO=$($NITROCTL query "$CONTRACT" '{"token_info":{}}')
 echo "Info: $INFO"

@@ -158,7 +158,7 @@ func (q *chainQuerier) bankQuery(query *wasmvmtypes.BankQuery) ([]byte, error) {
 		return json.Marshal(wasmvmtypes.BalanceResponse{
 			Amount: wasmvmtypes.Coin{
 				Denom:  query.Balance.Denom,
-				Amount: fmt.Sprintf("%d", bal),
+				Amount: bal.String(),
 			},
 		})
 	}
@@ -170,7 +170,7 @@ func (q *chainQuerier) bankQuery(query *wasmvmtypes.BankQuery) ([]byte, error) {
 		bal := q.vm.GetBalance(addr)
 		return json.Marshal(wasmvmtypes.AllBalancesResponse{
 			Amount: wasmvmtypes.Array[wasmvmtypes.Coin]{
-				{Denom: "YELLOW", Amount: fmt.Sprintf("%d", bal)},
+				{Denom: "YELLOW", Amount: bal.String()},
 			},
 		})
 	}
