@@ -143,7 +143,7 @@ type kvPair struct {
 }
 
 func (it *sliceIterator) Valid() bool { return it.pos < len(it.pairs) }
-func (it *sliceIterator) Next()      { it.pos++ }
+func (it *sliceIterator) Next()       { it.pos++ }
 
 func (it *sliceIterator) Key() []byte {
 	if !it.Valid() {

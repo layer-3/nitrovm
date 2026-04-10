@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	wasmvmtypes "github.com/CosmWasm/wasmvm/v2/types"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 
 	"github.com/layer-3/nitrovm/core"
 	"github.com/layer-3/nitrovm/crypto"

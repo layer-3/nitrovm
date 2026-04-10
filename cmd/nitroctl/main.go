@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	serverURL    = "http://localhost:26657"
+	serverURL           = "http://localhost:26657"
 	flagGasLimit uint64 = 500_000_000_000
 	flagNonce    *uint64
 	flagFunds    string
@@ -41,13 +41,17 @@ func readResponse(resp *http.Response) ([]byte, error) {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		var errResp struct{ Error string `json:"error"` }
+		var errResp struct {
+			Error string `json:"error"`
+		}
 		if json.Unmarshal(raw, &errResp) == nil && errResp.Error != "" {
 			return nil, fmt.Errorf("server error (HTTP %d): %s", resp.StatusCode, errResp.Error)
 		}
 		return nil, fmt.Errorf("server error: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
-	var errCheck struct{ Error string `json:"error"` }
+	var errCheck struct {
+		Error string `json:"error"`
+	}
 	if err := json.Unmarshal(raw, &errCheck); err == nil && errCheck.Error != "" {
 		return nil, fmt.Errorf("%s", errCheck.Error)
 	}
@@ -295,7 +299,9 @@ func cmdStore(args []string) error {
 	if err != nil {
 		return err
 	}
-	var result struct{ CodeID string `json:"code_id"` }
+	var result struct {
+		CodeID string `json:"code_id"`
+	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return fmt.Errorf("parse response: %w", err)
 	}
@@ -350,7 +356,9 @@ func cmdInstantiate(args []string) error {
 	if err != nil {
 		return err
 	}
-	var result struct{ Contract string `json:"contract"` }
+	var result struct {
+		Contract string `json:"contract"`
+	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return fmt.Errorf("parse response: %w", err)
 	}

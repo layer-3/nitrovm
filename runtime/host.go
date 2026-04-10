@@ -75,22 +75,22 @@ type wasmIterator struct {
 }
 
 func (it *wasmIterator) Domain() ([]byte, []byte) { return it.start, it.end }
-func (it *wasmIterator) Valid() bool               { return it.inner.Valid() }
-func (it *wasmIterator) Next()                     { it.inner.Next() }
-func (it *wasmIterator) Key() []byte               { return it.inner.Key() }
-func (it *wasmIterator) Value() []byte             { return it.inner.Value() }
-func (it *wasmIterator) Close() error              { return it.inner.Close() }
-func (it *wasmIterator) Error() error              { return nil }
+func (it *wasmIterator) Valid() bool              { return it.inner.Valid() }
+func (it *wasmIterator) Next()                    { it.inner.Next() }
+func (it *wasmIterator) Key() []byte              { return it.inner.Key() }
+func (it *wasmIterator) Value() []byte            { return it.inner.Value() }
+func (it *wasmIterator) Close() error             { return it.inner.Close() }
+func (it *wasmIterator) Error() error             { return nil }
 
 type emptyIterator struct{}
 
 func (it *emptyIterator) Domain() ([]byte, []byte) { return nil, nil }
-func (it *emptyIterator) Valid() bool               { return false }
-func (it *emptyIterator) Next()                     {}
-func (it *emptyIterator) Key() []byte               { return nil }
-func (it *emptyIterator) Value() []byte             { return nil }
-func (it *emptyIterator) Close() error              { return nil }
-func (it *emptyIterator) Error() error              { return nil }
+func (it *emptyIterator) Valid() bool              { return false }
+func (it *emptyIterator) Next()                    {}
+func (it *emptyIterator) Key() []byte              { return nil }
+func (it *emptyIterator) Value() []byte            { return nil }
+func (it *emptyIterator) Close() error             { return nil }
+func (it *emptyIterator) Error() error             { return nil }
 
 // ---------------------------------------------------------------------------
 // GoAPI — EVM-style address handling
