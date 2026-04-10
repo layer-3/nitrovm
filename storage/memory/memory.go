@@ -3,7 +3,6 @@ package memory
 
 import (
 	"bytes"
-	"fmt"
 	"sort"
 	"sync"
 
@@ -13,16 +12,14 @@ import (
 
 // Store implements storage.StorageAdapter using nested maps.
 type Store struct {
-	mu        sync.RWMutex
-	data      map[core.Address]map[string][]byte
-	snapshots map[string]map[core.Address]map[string][]byte
+	mu   sync.RWMutex
+	data map[core.Address]map[string][]byte
 }
 
 // New creates a new in-memory storage adapter.
 func New() *Store {
 	return &Store{
-		data:      make(map[core.Address]map[string][]byte),
-		snapshots: make(map[string]map[core.Address]map[string][]byte),
+		data: make(map[core.Address]map[string][]byte),
 	}
 }
 
@@ -93,42 +90,35 @@ func (s *Store) Range(contractAddr core.Address, start, end []byte, order storag
 
 func (s *Store) Close() error { return nil }
 
-// Savepoint creates a named snapshot of the current state.
-func (s *Store) Savepoint(name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.snapshots[name] = s.deepCopy()
-	return nil
+// Snapshot returns a deep copy of the store's data for rollback.
+func (s *Store) Snapshot() any {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.deepCopy()
 }
 
-// RollbackTo restores state to a previously created savepoint.
-func (s *Store) RollbackTo(name string) error {
+// Restore replaces the store's data from a snapshot previously returned by Snapshot.
+func (s *Store) Restore(snap any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snap, ok := s.snapshots[name]
-	if !ok {
-		return fmt.Errorf("savepoint %q not found", name)
+	s.data = snap.(map[core.Address]map[string][]byte)
+}
+
+// ForEach iterates over all stored key-value pairs.
+// Used to flush in-memory state to persistent storage.
+func (s *Store) ForEach(fn func(addr core.Address, key, value []byte)) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for addr, m := range s.data {
+		for k, v := range m {
+			fn(addr, []byte(k), v)
+		}
 	}
-	s.data = s.deepCopyFrom(snap)
-	delete(s.snapshots, name)
-	return nil
-}
-
-// ReleaseSavepoint discards a savepoint without rolling back.
-func (s *Store) ReleaseSavepoint(name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.snapshots, name)
-	return nil
 }
 
 func (s *Store) deepCopy() map[core.Address]map[string][]byte {
-	return s.deepCopyFrom(s.data)
-}
-
-func (s *Store) deepCopyFrom(src map[core.Address]map[string][]byte) map[core.Address]map[string][]byte {
-	cp := make(map[core.Address]map[string][]byte, len(src))
-	for addr, m := range src {
+	cp := make(map[core.Address]map[string][]byte, len(s.data))
+	for addr, m := range s.data {
 		cm := make(map[string][]byte, len(m))
 		for k, v := range m {
 			cm[k] = append([]byte(nil), v...)

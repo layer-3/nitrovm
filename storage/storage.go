@@ -28,10 +28,11 @@ type StorageAdapter interface {
 	Close() error
 }
 
-// TransactionalStore is optionally implemented by StorageAdapter backends
-// that support savepoint-based rollback (e.g., SQLite, memory).
-type TransactionalStore interface {
-	Savepoint(name string) error
-	RollbackTo(name string) error
-	ReleaseSavepoint(name string) error
+// Snapshotable is optionally implemented by StorageAdapter backends
+// that support snapshot/restore (e.g., in-memory stores).
+// The VM uses this to include storage in its own Snapshot/Restore cycle,
+// eliminating the need for separate transactional savepoints.
+type Snapshotable interface {
+	Snapshot() any
+	Restore(snap any)
 }

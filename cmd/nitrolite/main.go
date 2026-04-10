@@ -14,7 +14,7 @@ import (
 	"github.com/layer-3/nitrovm/core"
 	"github.com/layer-3/nitrovm/node"
 	"github.com/layer-3/nitrovm/runtime"
-	"github.com/layer-3/nitrovm/storage/sqlite"
+	"github.com/layer-3/nitrovm/storage/memory"
 )
 
 func main() {
@@ -29,21 +29,18 @@ func main() {
 		log.Fatalf("invalid network: %q (must be devnet, testnet, or mainnet)", *network)
 	}
 
-	// Open metadata DB.
+	// Open state DB (metadata + contract storage persistence).
 	dbPath := filepath.Join(*dataDir, "state.db")
 	metaDB, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
 	if err != nil {
-		log.Fatalf("open meta db: %v", err)
+		log.Fatalf("open db: %v", err)
 	}
 	if err := node.CreateMetaTables(metaDB); err != nil {
-		log.Fatalf("create meta tables: %v", err)
+		log.Fatalf("create tables: %v", err)
 	}
 
-	// Contract KV storage.
-	store, err := sqlite.New(dbPath)
-	if err != nil {
-		log.Fatalf("open storage: %v", err)
-	}
+	// In-memory contract KV storage; flushed to SQLite on each successful commit.
+	store := memory.New()
 
 	cfg := core.DefaultConfig()
 	cfg.DataDir = *dataDir
@@ -59,7 +56,7 @@ func main() {
 		DataDir:     *dataDir,
 		Network:     net,
 		MinGasPrice: *minGasPrice,
-	}, metaDB, store, vm)
+	}, metaDB, vm)
 
 	if err := s.Restore(); err != nil {
 		log.Fatalf("restore state: %v", err)

@@ -15,7 +15,7 @@ import (
 
 	"github.com/layer-3/nitrovm/core"
 	"github.com/layer-3/nitrovm/crypto"
-	"github.com/layer-3/nitrovm/storage/memory"
+	"github.com/layer-3/nitrovm/storage"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -220,9 +220,10 @@ func (m *mockVM) ChainID() string {
 	return "nitro-test"
 }
 
-func (m *mockVM) Snapshot() any { m.snapshotCount++; return m.snapshotCount }
-func (m *mockVM) Restore(any)   { m.restoreCount++ }
-func (m *mockVM) Close()        {}
+func (m *mockVM) Snapshot() any                    { m.snapshotCount++; return m.snapshotCount }
+func (m *mockVM) Restore(any)                      { m.restoreCount++ }
+func (m *mockVM) Storage() storage.StorageAdapter   { return nil }
+func (m *mockVM) Close()                           {}
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -249,16 +250,14 @@ func testDB(t *testing.T) *sql.DB {
 func newTestServer(t *testing.T, vm *mockVM) *Server {
 	t.Helper()
 	db := testDB(t)
-	store := memory.New()
-	return New(Config{Network: Devnet}, db, store, vm)
+	return New(Config{Network: Devnet}, db, vm)
 }
 
 // newTestServerWithCfg allows custom server config.
 func newTestServerWithCfg(t *testing.T, vm *mockVM, cfg Config) *Server {
 	t.Helper()
 	db := testDB(t)
-	store := memory.New()
-	return New(cfg, db, store, vm)
+	return New(cfg, db, vm)
 }
 
 // testKey returns the Hardhat account 0 private key.

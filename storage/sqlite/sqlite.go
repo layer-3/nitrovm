@@ -4,7 +4,6 @@ package sqlite
 import (
 	"database/sql"
 	"fmt"
-	"regexp"
 	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -12,9 +11,6 @@ import (
 	"github.com/layer-3/nitrovm/core"
 	"github.com/layer-3/nitrovm/storage"
 )
-
-// validSavepointName matches only safe alphanumeric/underscore savepoint names.
-var validSavepointName = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
 // Store implements storage.StorageAdapter backed by SQLite.
 type Store struct {
@@ -123,39 +119,6 @@ func (s *Store) Range(contractAddr core.Address, start, end []byte, order storag
 
 func (s *Store) Close() error {
 	return s.db.Close()
-}
-
-// Savepoint creates a named SQLite savepoint for transactional rollback.
-func (s *Store) Savepoint(name string) error {
-	if !validSavepointName.MatchString(name) {
-		return fmt.Errorf("invalid savepoint name: %q", name)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.Exec("SAVEPOINT " + name)
-	return err
-}
-
-// RollbackTo rolls back to a previously created savepoint.
-func (s *Store) RollbackTo(name string) error {
-	if !validSavepointName.MatchString(name) {
-		return fmt.Errorf("invalid savepoint name: %q", name)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.Exec("ROLLBACK TO " + name)
-	return err
-}
-
-// ReleaseSavepoint releases a savepoint without rolling back.
-func (s *Store) ReleaseSavepoint(name string) error {
-	if !validSavepointName.MatchString(name) {
-		return fmt.Errorf("invalid savepoint name: %q", name)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.Exec("RELEASE SAVEPOINT " + name)
-	return err
 }
 
 // sliceIterator pre-loads all results into memory to avoid holding open DB cursors.

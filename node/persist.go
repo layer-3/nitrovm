@@ -12,6 +12,7 @@ import (
 	wasmvmtypes "github.com/CosmWasm/wasmvm/v2/types"
 
 	"github.com/layer-3/nitrovm/core"
+	"github.com/layer-3/nitrovm/storage/memory"
 )
 
 // dbExecer abstracts *sql.DB and *sql.Tx for persistence helpers.
@@ -40,6 +41,12 @@ func CreateMetaTables(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_events_contract ON events(contract);
 		CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 		CREATE INDEX IF NOT EXISTS idx_events_sender ON events(sender);
+		CREATE TABLE IF NOT EXISTS contract_storage (
+			contract_addr BLOB NOT NULL,
+			key BLOB NOT NULL,
+			value BLOB NOT NULL,
+			PRIMARY KEY (contract_addr, key)
+		);
 	`)
 	if err != nil {
 		return err
@@ -156,6 +163,11 @@ func (s *Server) restore() error {
 		}
 	}
 
+	// Restore contract KV storage from SQLite into the in-memory store.
+	if err := s.restoreStorage(); err != nil {
+		return fmt.Errorf("restore storage: %w", err)
+	}
+
 	// Drain the touched set so that SetBalance/SetNonce calls above
 	// don't pollute the first real execution's dirty tracking.
 	s.vm.TouchedAddresses()
@@ -184,6 +196,59 @@ func (s *Server) persistBalance(db dbExecer, addr core.Address) error {
 	nonce := s.vm.GetNonce(addr)
 	_, err := db.Exec("INSERT OR REPLACE INTO accounts (address, balance, nonce) VALUES (?, ?, ?)", addr.Hex(), bal.String(), nonce)
 	return err
+}
+
+// flushStorage writes the full in-memory contract storage to SQLite.
+// Called within the handler's SQL transaction on successful commit.
+func (s *Server) flushStorage(db dbExecer) error {
+	store, ok := s.vm.Storage().(*memory.Store)
+	if !ok {
+		return nil
+	}
+	if _, err := db.Exec("DELETE FROM contract_storage"); err != nil {
+		return fmt.Errorf("clear contract_storage: %w", err)
+	}
+	var flushErr error
+	store.ForEach(func(addr core.Address, key, value []byte) {
+		if flushErr != nil {
+			return
+		}
+		_, flushErr = db.Exec(
+			"INSERT INTO contract_storage (contract_addr, key, value) VALUES (?, ?, ?)",
+			addr[:], key, value,
+		)
+	})
+	return flushErr
+}
+
+// restoreStorage loads contract KV data from SQLite into the in-memory store.
+func (s *Server) restoreStorage() error {
+	store, ok := s.vm.Storage().(*memory.Store)
+	if !ok {
+		return nil
+	}
+	rows, err := s.db.Query("SELECT contract_addr, key, value FROM contract_storage")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var count int
+	for rows.Next() {
+		var addrBytes, key, value []byte
+		if err := rows.Scan(&addrBytes, &key, &value); err != nil {
+			return err
+		}
+		var addr core.Address
+		copy(addr[:], addrBytes)
+		if err := store.Set(addr, key, value); err != nil {
+			return err
+		}
+		count++
+	}
+	if count > 0 {
+		log.Printf("restored %d contract storage entries", count)
+	}
+	return rows.Err()
 }
 
 func (s *Server) persistEvents(db dbExecer, txType, contract, sender string, attrs []wasmvmtypes.EventAttribute, events []wasmvmtypes.Event) error {

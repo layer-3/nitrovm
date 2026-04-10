@@ -16,7 +16,7 @@ import (
 	"github.com/layer-3/nitrovm"
 	"github.com/layer-3/nitrovm/core"
 	"github.com/layer-3/nitrovm/crypto"
-	"github.com/layer-3/nitrovm/storage"
+
 )
 
 type coin struct {
@@ -74,8 +74,7 @@ type Config struct {
 // Server wraps a NitroVM instance with HTTP handlers and SQLite persistence.
 type Server struct {
 	vm          nitrovm.VM
-	db          *sql.DB                // metadata persistence (codes, contracts, accounts, meta)
-	store       storage.StorageAdapter // contract KV storage (for simulate savepoints)
+	db          *sql.DB // metadata + contract storage persistence
 	network     Network
 	minGasPrice uint64
 	httpSrv     *http.Server
@@ -83,7 +82,7 @@ type Server struct {
 }
 
 // New creates a new Server. Opens databases, creates the VM, and restores state.
-func New(cfg Config, metaDB *sql.DB, store storage.StorageAdapter, vm nitrovm.VM) *Server {
+func New(cfg Config, metaDB *sql.DB, vm nitrovm.VM) *Server {
 	network := cfg.Network
 	if network == "" {
 		network = Devnet
@@ -91,7 +90,6 @@ func New(cfg Config, metaDB *sql.DB, store storage.StorageAdapter, vm nitrovm.VM
 	return &Server{
 		vm:          vm,
 		db:          metaDB,
-		store:       store,
 		network:     network,
 		minGasPrice: cfg.MinGasPrice,
 	}

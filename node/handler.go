@@ -11,7 +11,6 @@ import (
 
 	"github.com/layer-3/nitrovm/core"
 	"github.com/layer-3/nitrovm/crypto"
-	"github.com/layer-3/nitrovm/storage"
 )
 
 func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
@@ -40,26 +39,11 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	nonce := stx.Tx.Nonce
 	gasPrice := stx.Tx.GasPrice
 
-	// Always snapshot so we can rollback on any failure.
 	snap := s.vm.Snapshot()
-	var ts storage.TransactionalStore
-	if t, ok := s.store.(storage.TransactionalStore); ok {
-		ts = t
-		if err := ts.Savepoint("gasfee_store"); err != nil {
-			writeErr(w, http.StatusInternalServerError, "savepoint: "+err.Error())
-			return
-		}
-	}
-	rollback := func() {
-		s.vm.Restore(snap)
-		if ts != nil {
-			ts.RollbackTo("gasfee_store")
-		}
-	}
 
 	codeID, gasUsed, err := s.vm.StoreCode(wasm, &sender, &nonce)
 	if err != nil {
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -68,7 +52,7 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	codeSeq, _ := s.vm.GetCodeSeq(codeHex)
 	dbTx, err := s.db.Begin()
 	if err != nil {
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "begin tx: "+err.Error())
 		return
 	}
@@ -78,7 +62,7 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 		gasFeeStr, err = s.deductGasFee(dbTx, sender, gasUsed, gasPrice)
 		if err != nil {
 			dbTx.Rollback()
-			rollback()
+			s.vm.Restore(snap)
 			writeErr(w, http.StatusBadRequest, "gas fee: "+err.Error())
 			return
 		}
@@ -86,37 +70,32 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := dbTx.Exec("INSERT OR REPLACE INTO codes (code_id, wasm) VALUES (?, ?)", codeHex, wasm); err != nil {
 		dbTx.Rollback()
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "persist code: "+err.Error())
 		return
 	}
 	if _, err := dbTx.Exec("INSERT OR IGNORE INTO code_seqs (seq_id, code_id) VALUES (?, ?)", codeSeq, codeHex); err != nil {
 		dbTx.Rollback()
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "persist code seq: "+err.Error())
 		return
 	}
 	if err := s.persistBalance(dbTx, sender); err != nil {
 		dbTx.Rollback()
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "persist balance: "+err.Error())
 		return
 	}
 	if err := s.tickOp(dbTx); err != nil {
 		dbTx.Rollback()
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "tick op: "+err.Error())
 		return
 	}
 	if err := dbTx.Commit(); err != nil {
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "commit: "+err.Error())
 		return
-	}
-
-	// Success — release storage savepoint.
-	if ts != nil {
-		ts.ReleaseSavepoint("gasfee_store")
 	}
 
 	resp := map[string]any{"code_id": codeHex, "code_seq": codeSeq, "gas_used": gasUsed, "sender": sender.Hex()}
@@ -156,28 +135,12 @@ func (s *Server) handleInstantiate(w http.ResponseWriter, r *http.Request) {
 	nonce := stx.Tx.Nonce
 	gasPrice := stx.Tx.GasPrice
 
-	// Always snapshot so we can rollback on any failure.
 	snap := s.vm.Snapshot()
-	var ts storage.TransactionalStore
-	if t, ok := s.store.(storage.TransactionalStore); ok {
-		ts = t
-		if err := ts.Savepoint("gasfee_instantiate"); err != nil {
-			writeErr(w, http.StatusInternalServerError, "savepoint: "+err.Error())
-			return
-		}
-	}
-	rollback := func() {
-		s.vm.Restore(snap)
-		if ts != nil {
-			ts.RollbackTo("gasfee_instantiate")
-		}
-	}
 
 	res, gasUsed, err := s.vm.Instantiate(codeID, sender, msg, label, funds, gl, &nonce)
 	if err != nil {
-		rollback()
+		s.vm.Restore(snap)
 		// Charge gas even on failure if gas was consumed.
-		// Deduct AFTER rollback so in-memory and DB state agree.
 		if gasPrice > 0 && gasUsed > 0 {
 			if feeErr := s.vm.DeductGasFee(sender, gasUsed, gasPrice); feeErr == nil {
 				s.persistBalance(s.db, sender)
@@ -187,13 +150,11 @@ func (s *Server) handleInstantiate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Capture all addresses modified during instantiation (including sub-message
-	// recipients) so we can persist their balances below.
 	touched := s.vm.TouchedAddresses()
 
 	dbTx, err := s.db.Begin()
 	if err != nil {
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "begin tx: "+err.Error())
 		return
 	}
@@ -203,61 +164,61 @@ func (s *Server) handleInstantiate(w http.ResponseWriter, r *http.Request) {
 		gasFeeStr, err = s.deductGasFee(dbTx, sender, gasUsed, gasPrice)
 		if err != nil {
 			dbTx.Rollback()
-			rollback()
+			s.vm.Restore(snap)
 			writeErr(w, http.StatusBadRequest, "gas fee: "+err.Error())
 			return
 		}
 	}
 
 	codeHex := hex.EncodeToString(codeID)
-	// Persist the newly created contract and any contracts spawned via sub-messages.
 	for _, ci := range s.vm.ListContracts() {
 		if _, err := dbTx.Exec("INSERT OR IGNORE INTO contracts (address, code_id, label, creator) VALUES (?,?,?,?)",
 			ci.Address, ci.CodeID, ci.Label, ci.Creator); err != nil {
 			dbTx.Rollback()
-			rollback()
+			s.vm.Restore(snap)
 			writeErr(w, http.StatusInternalServerError, "persist contract: "+err.Error())
 			return
 		}
 	}
-	_ = codeHex // used indirectly via ListContracts
+	_ = codeHex
 	instanceCount := s.vm.GetInstanceCount()
 	if _, err := dbTx.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('instance_count', ?)",
 		fmt.Sprintf("%d", instanceCount)); err != nil {
 		dbTx.Rollback()
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "persist instance count: "+err.Error())
 		return
 	}
 	for _, addr := range touched {
 		if err := s.persistBalance(dbTx, addr); err != nil {
 			dbTx.Rollback()
-			rollback()
+			s.vm.Restore(snap)
 			writeErr(w, http.StatusInternalServerError, "persist balance: "+err.Error())
 			return
 		}
 	}
 	if err := s.persistEvents(dbTx, "instantiate", res.ContractAddress.Hex(), sender.Hex(), res.Attributes, res.Events); err != nil {
 		dbTx.Rollback()
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "persist events: "+err.Error())
+		return
+	}
+	if err := s.flushStorage(dbTx); err != nil {
+		dbTx.Rollback()
+		s.vm.Restore(snap)
+		writeErr(w, http.StatusInternalServerError, "flush storage: "+err.Error())
 		return
 	}
 	if err := s.tickOp(dbTx); err != nil {
 		dbTx.Rollback()
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "tick op: "+err.Error())
 		return
 	}
 	if err := dbTx.Commit(); err != nil {
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "commit: "+err.Error())
 		return
-	}
-
-	// Success — release storage savepoint.
-	if ts != nil {
-		ts.ReleaseSavepoint("gasfee_instantiate")
 	}
 
 	resp := map[string]any{"contract": res.ContractAddress.Hex(), "gas_used": gasUsed, "sender": sender.Hex()}
@@ -302,22 +263,7 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 	nonce := stx.Tx.Nonce
 	gasPrice := stx.Tx.GasPrice
 
-	// Always snapshot so we can rollback on any failure.
 	snap := s.vm.Snapshot()
-	var ts storage.TransactionalStore
-	if t, ok := s.store.(storage.TransactionalStore); ok {
-		ts = t
-		if err := ts.Savepoint("gasfee_execute"); err != nil {
-			writeErr(w, http.StatusInternalServerError, "savepoint: "+err.Error())
-			return
-		}
-	}
-	rollback := func() {
-		s.vm.Restore(snap)
-		if ts != nil {
-			ts.RollbackTo("gasfee_execute")
-		}
-	}
 
 	// Capture known contracts before execution to diff afterward.
 	knownContracts := make(map[string]struct{})
@@ -327,9 +273,8 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 	res, gasUsed, err := s.vm.Execute(contract, sender, msg, funds, gl, &nonce)
 	if err != nil {
-		rollback()
+		s.vm.Restore(snap)
 		// Charge gas even on failure if gas was consumed.
-		// Deduct AFTER rollback so in-memory and DB state agree.
 		if gasPrice > 0 && gasUsed > 0 {
 			if feeErr := s.vm.DeductGasFee(sender, gasUsed, gasPrice); feeErr == nil {
 				s.persistBalance(s.db, sender)
@@ -339,13 +284,11 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Capture all addresses modified during execution (including sub-message
-	// recipients) so we can persist their balances below.
 	touched := s.vm.TouchedAddresses()
 
 	dbTx, err := s.db.Begin()
 	if err != nil {
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "begin tx: "+err.Error())
 		return
 	}
@@ -355,7 +298,7 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 		gasFeeStr, err = s.deductGasFee(dbTx, sender, gasUsed, gasPrice)
 		if err != nil {
 			dbTx.Rollback()
-			rollback()
+			s.vm.Restore(snap)
 			writeErr(w, http.StatusBadRequest, "gas fee: "+err.Error())
 			return
 		}
@@ -364,12 +307,11 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 	for _, addr := range touched {
 		if err := s.persistBalance(dbTx, addr); err != nil {
 			dbTx.Rollback()
-			rollback()
+			s.vm.Restore(snap)
 			writeErr(w, http.StatusInternalServerError, "persist balance: "+err.Error())
 			return
 		}
 	}
-	// Persist only newly created contracts (spawned via sub-message dispatch).
 	for _, ci := range s.vm.ListContracts() {
 		if _, exists := knownContracts[ci.Address]; exists {
 			continue
@@ -377,40 +319,40 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 		if _, err := dbTx.Exec("INSERT OR IGNORE INTO contracts (address, code_id, label, creator) VALUES (?,?,?,?)",
 			ci.Address, ci.CodeID, ci.Label, ci.Creator); err != nil {
 			dbTx.Rollback()
-			rollback()
+			s.vm.Restore(snap)
 			writeErr(w, http.StatusInternalServerError, "persist contract: "+err.Error())
 			return
 		}
 	}
-	// Persist instance count if new contracts were created.
 	if _, err := dbTx.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('instance_count', ?)",
 		fmt.Sprintf("%d", s.vm.GetInstanceCount())); err != nil {
 		dbTx.Rollback()
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "persist instance count: "+err.Error())
 		return
 	}
 	if err := s.persistEvents(dbTx, "execute", contract.Hex(), sender.Hex(), res.Attributes, res.Events); err != nil {
 		dbTx.Rollback()
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "persist events: "+err.Error())
+		return
+	}
+	if err := s.flushStorage(dbTx); err != nil {
+		dbTx.Rollback()
+		s.vm.Restore(snap)
+		writeErr(w, http.StatusInternalServerError, "flush storage: "+err.Error())
 		return
 	}
 	if err := s.tickOp(dbTx); err != nil {
 		dbTx.Rollback()
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "tick op: "+err.Error())
 		return
 	}
 	if err := dbTx.Commit(); err != nil {
-		rollback()
+		s.vm.Restore(snap)
 		writeErr(w, http.StatusInternalServerError, "commit: "+err.Error())
 		return
-	}
-
-	// Success — release storage savepoint.
-	if ts != nil {
-		ts.ReleaseSavepoint("gasfee_execute")
 	}
 
 	resp := map[string]any{"data": res.Data, "gas_used": gasUsed, "sender": sender.Hex()}
@@ -642,18 +584,9 @@ func (s *Server) handleSimulate(w http.ResponseWriter, r *http.Request) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	// Snapshot VM in-memory state.
+	// Snapshot covers both VM state and contract storage.
 	snap := s.vm.Snapshot()
 	defer s.vm.Restore(snap)
-
-	// Savepoint storage if supported.
-	if ts, ok := s.store.(storage.TransactionalStore); ok {
-		if err := ts.Savepoint("simulate"); err != nil {
-			writeErr(w, http.StatusInternalServerError, "savepoint: "+err.Error())
-			return
-		}
-		defer ts.RollbackTo("simulate")
-	}
 
 	const maxSimulateGas uint64 = 50_000_000
 	gl := maxSimulateGas

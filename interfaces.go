@@ -4,10 +4,12 @@ import (
 	wasmvmtypes "github.com/CosmWasm/wasmvm/v2/types"
 
 	"github.com/layer-3/nitrovm/core"
+	"github.com/layer-3/nitrovm/storage"
 )
 
 // VM defines the public contract runtime interface.
 type VM interface {
+	Storage() storage.StorageAdapter
 	StoreCode(code []byte, sender *core.Address, nonce *uint64) ([]byte, uint64, error)
 	Instantiate(codeID []byte, sender core.Address, msg []byte, label string, funds []wasmvmtypes.Coin, gasLimit uint64, nonce *uint64) (*core.InstantiateResult, uint64, error)
 	Execute(contract, sender core.Address, msg []byte, funds []wasmvmtypes.Coin, gasLimit uint64, nonce *uint64) (*core.ExecuteResult, uint64, error)

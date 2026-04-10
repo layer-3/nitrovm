@@ -557,21 +557,13 @@ func (n *NitroVM) dispatchMessages(
 
 	dr := &dispatchResult{}
 	remaining := gasLimit
-	for i, sub := range msgs {
+	for _, sub := range msgs {
 		canCatchError := sub.ReplyOn == wasmvmtypes.ReplyError || sub.ReplyOn == wasmvmtypes.ReplyAlways
 
 		// Snapshot state before dispatch when the error may be caught.
 		var vmSnap any
-		var ts storage.TransactionalStore
-		spName := fmt.Sprintf("reply_d%d_i%d", depth, i)
 		if canCatchError {
 			vmSnap = n.Snapshot()
-			if t, ok := n.storage.(storage.TransactionalStore); ok {
-				ts = t
-				if err := ts.Savepoint(spName); err != nil {
-					return dr, fmt.Errorf("savepoint: %w", err)
-				}
-			}
 		}
 
 		subEvents, subData, subGasUsed, dispatchErr := n.dispatchSingleMessage(contractAddr, sub.Msg, remaining, depth)
@@ -580,11 +572,9 @@ func (n *NitroVM) dispatchMessages(
 
 		if dispatchErr != nil {
 			if canCatchError {
-				// Rollback the failed sub-message's state changes.
+				// Rollback the failed sub-message's state changes
+				// (VM Restore includes contract storage when Snapshotable).
 				n.Restore(vmSnap)
-				if ts != nil {
-					_ = ts.RollbackTo(spName)
-				}
 
 				// Invoke reply with error result.
 				reply := wasmvmtypes.Reply{
@@ -608,10 +598,6 @@ func (n *NitroVM) dispatchMessages(
 			}
 		} else {
 			// Success path.
-			if canCatchError && ts != nil {
-				_ = ts.ReleaseSavepoint(spName)
-			}
-
 			if sub.ReplyOn == wasmvmtypes.ReplySuccess || sub.ReplyOn == wasmvmtypes.ReplyAlways {
 				reply := wasmvmtypes.Reply{
 					ID:      sub.ID,
@@ -825,6 +811,9 @@ func (n *NitroVM) DeductGasFee(sender core.Address, gasUsed, gasPrice uint64) er
 // ChainID returns the configured chain identifier.
 func (n *NitroVM) ChainID() string { return n.chainID }
 
+// Storage returns the underlying storage adapter.
+func (n *NitroVM) Storage() storage.StorageAdapter { return n.storage }
+
 // vmSnapshot holds a deep copy of mutable VM state for simulate/rollback.
 type vmSnapshot struct {
 	accounts      map[core.Address]*core.Account
@@ -837,6 +826,7 @@ type vmSnapshot struct {
 	instanceCount uint64
 	blockHeight   uint64
 	blockTime     uint64
+	storageSnap   any // from storage.Snapshotable, nil if unsupported
 }
 
 // Snapshot captures the current mutable state.
@@ -874,6 +864,11 @@ func (n *NitroVM) Snapshot() any {
 		touched[k] = struct{}{}
 	}
 
+	var storageSnap any
+	if ss, ok := n.storage.(storage.Snapshotable); ok {
+		storageSnap = ss.Snapshot()
+	}
+
 	return vmSnapshot{
 		accounts:      accts,
 		contracts:     contracts,
@@ -885,12 +880,18 @@ func (n *NitroVM) Snapshot() any {
 		instanceCount: n.instanceCount,
 		blockHeight:   n.blockHeight,
 		blockTime:     n.blockTime,
+		storageSnap:   storageSnap,
 	}
 }
 
 // Restore replaces mutable state from a snapshot previously returned by Snapshot.
 func (n *NitroVM) Restore(snap any) {
 	s := snap.(vmSnapshot)
+	if s.storageSnap != nil {
+		if ss, ok := n.storage.(storage.Snapshotable); ok {
+			ss.Restore(s.storageSnap)
+		}
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.accounts = s.accounts

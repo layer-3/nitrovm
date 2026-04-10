@@ -116,14 +116,14 @@ func TestStoreRange(t *testing.T) {
 	}
 }
 
-func TestSavepointRollback(t *testing.T) {
+func TestSnapshotRestore(t *testing.T) {
 	store := New()
 	defer store.Close()
 
 	addr, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
 	store.Set(addr, []byte("key"), []byte("original"))
 
-	store.Savepoint("sp1")
+	snap := store.Snapshot()
 	store.Set(addr, []byte("key"), []byte("modified"))
 	store.Set(addr, []byte("new"), []byte("value"))
 
@@ -133,14 +133,14 @@ func TestSavepointRollback(t *testing.T) {
 		t.Fatalf("after modify = %q, want modified", got)
 	}
 
-	// Rollback.
-	store.RollbackTo("sp1")
+	// Restore.
+	store.Restore(snap)
 	got, _ = store.Get(addr, []byte("key"))
 	if string(got) != "original" {
-		t.Fatalf("after rollback = %q, want original", got)
+		t.Fatalf("after restore = %q, want original", got)
 	}
 	got, _ = store.Get(addr, []byte("new"))
 	if got != nil {
-		t.Fatalf("after rollback new key should be nil, got %q", got)
+		t.Fatalf("after restore new key should be nil, got %q", got)
 	}
 }
