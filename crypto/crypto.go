@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
@@ -10,6 +11,10 @@ import (
 
 	"github.com/layer-3/nitrovm/core"
 )
+
+// secp256k1HalfOrder is the half of the secp256k1 curve order.
+// Signatures with S > halfOrder are malleable and must be rejected.
+var secp256k1HalfOrder, _ = new(big.Int).SetString("7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0", 16)
 
 // TxType discriminates transaction kinds.
 type TxType uint8
@@ -124,7 +129,19 @@ func SignTx(tx *Transaction, privkey *secp256k1.PrivateKey) (*SignedTransaction,
 }
 
 // RecoverSender recovers the sender address from a signed transaction.
+// Rejects signatures where V > 1 or S > secp256k1 half-order (malleability).
 func RecoverSender(stx *SignedTransaction) (core.Address, error) {
+	// Validate recovery ID.
+	if stx.V > 1 {
+		return core.Address{}, fmt.Errorf("%w: V must be 0 or 1, got %d", core.ErrInvalidSignature, stx.V)
+	}
+
+	// Reject malleable signatures (S must be in the lower half of the curve order).
+	sVal := new(big.Int).SetBytes(stx.S[:])
+	if sVal.Cmp(secp256k1HalfOrder) > 0 {
+		return core.Address{}, fmt.Errorf("%w: S value exceeds half curve order (malleable)", core.ErrInvalidSignature)
+	}
+
 	hash, err := HashTx(&stx.Tx)
 	if err != nil {
 		return core.Address{}, fmt.Errorf("hash tx: %w", err)
@@ -174,9 +191,14 @@ func DecodeSignedTx(data []byte) (*SignedTransaction, error) {
 		return nil, err
 	}
 
+	v := data[sigStart]
+	if v > 1 {
+		return nil, fmt.Errorf("%w: V must be 0 or 1, got %d", core.ErrInvalidSignature, v)
+	}
+
 	stx := &SignedTransaction{
 		Tx: *tx,
-		V:  data[sigStart],
+		V:  v,
 	}
 	copy(stx.R[:], data[sigStart+1:sigStart+33])
 	copy(stx.S[:], data[sigStart+33:sigStart+65])

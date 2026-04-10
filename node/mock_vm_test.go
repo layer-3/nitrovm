@@ -28,8 +28,8 @@ import (
 // Nil stubs fall through to simple default behavior.
 type mockVM struct {
 	storeCodeFn        func([]byte, *core.Address, *uint64) ([]byte, uint64, error)
-	instantiateFn      func([]byte, core.Address, []byte, string, []wasmvmtypes.Coin, uint64, *uint64) (*core.InstantiateResult, error)
-	executeFn          func(core.Address, core.Address, []byte, []wasmvmtypes.Coin, uint64, *uint64) (*core.ExecuteResult, error)
+	instantiateFn      func([]byte, core.Address, []byte, string, []wasmvmtypes.Coin, uint64, *uint64) (*core.InstantiateResult, uint64, error)
+	executeFn          func(core.Address, core.Address, []byte, []wasmvmtypes.Coin, uint64, *uint64) (*core.ExecuteResult, uint64, error)
 	queryFn            func(core.Address, []byte, uint64) ([]byte, uint64, error)
 	getBalanceFn       func(core.Address) core.Amount
 	setBalanceFn       func(core.Address, core.Amount)
@@ -50,6 +50,9 @@ type mockVM struct {
 	chainID      string
 	opSeq        uint64
 
+	// Dirty-address tracking.
+	touched map[core.Address]struct{}
+
 	// Counters for assertions.
 	snapshotCount int
 	restoreCount  int
@@ -63,19 +66,19 @@ func (m *mockVM) StoreCode(code []byte, sender *core.Address, nonce *uint64) ([]
 	return []byte{0xab, 0xcd}, 42000, nil
 }
 
-func (m *mockVM) Instantiate(codeID []byte, sender core.Address, msg []byte, label string, funds []wasmvmtypes.Coin, gasLimit uint64, nonce *uint64) (*core.InstantiateResult, error) {
+func (m *mockVM) Instantiate(codeID []byte, sender core.Address, msg []byte, label string, funds []wasmvmtypes.Coin, gasLimit uint64, nonce *uint64) (*core.InstantiateResult, uint64, error) {
 	if m.instantiateFn != nil {
 		return m.instantiateFn(codeID, sender, msg, label, funds, gasLimit, nonce)
 	}
 	addr, _ := core.HexToAddress("0x00000000000000000000000000000000deadbeef")
-	return &core.InstantiateResult{ContractAddress: addr, GasUsed: 5000}, nil
+	return &core.InstantiateResult{ContractAddress: addr, GasUsed: 5000}, 5000, nil
 }
 
-func (m *mockVM) Execute(contract, sender core.Address, msg []byte, funds []wasmvmtypes.Coin, gasLimit uint64, nonce *uint64) (*core.ExecuteResult, error) {
+func (m *mockVM) Execute(contract, sender core.Address, msg []byte, funds []wasmvmtypes.Coin, gasLimit uint64, nonce *uint64) (*core.ExecuteResult, uint64, error) {
 	if m.executeFn != nil {
 		return m.executeFn(contract, sender, msg, funds, gasLimit, nonce)
 	}
-	return &core.ExecuteResult{GasUsed: 1000}, nil
+	return &core.ExecuteResult{GasUsed: 1000}, 1000, nil
 }
 
 func (m *mockVM) Query(contract core.Address, msg []byte, gasLimit uint64) ([]byte, uint64, error) {
@@ -97,6 +100,22 @@ func (m *mockVM) GetBalance(addr core.Address) core.Amount {
 	return core.Amount{}
 }
 
+func (m *mockVM) markTouched(addr core.Address) {
+	if m.touched == nil {
+		m.touched = make(map[core.Address]struct{})
+	}
+	m.touched[addr] = struct{}{}
+}
+
+func (m *mockVM) TouchedAddresses() []core.Address {
+	addrs := make([]core.Address, 0, len(m.touched))
+	for addr := range m.touched {
+		addrs = append(addrs, addr)
+	}
+	m.touched = nil
+	return addrs
+}
+
 func (m *mockVM) SetBalance(addr core.Address, balance core.Amount) {
 	if m.setBalanceFn != nil {
 		m.setBalanceFn(addr, balance)
@@ -106,6 +125,7 @@ func (m *mockVM) SetBalance(addr core.Address, balance core.Amount) {
 		m.balances = make(map[core.Address]core.Amount)
 	}
 	m.balances[addr] = balance
+	m.markTouched(addr)
 }
 
 func (m *mockVM) GetNonce(addr core.Address) uint64 {

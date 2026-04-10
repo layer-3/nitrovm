@@ -63,7 +63,7 @@ func mustJSON(t *testing.T, v any) []byte {
 
 func mustExec(t *testing.T, vm *runtime.NitroVM, contract, sender core.Address, msg []byte, funds []wasmvmtypes.Coin) {
 	t.Helper()
-	if _, err := vm.Execute(contract, sender, msg, funds, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(contract, sender, msg, funds, testGasLimit, nil); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 }
@@ -89,7 +89,7 @@ func instantiateToken(t *testing.T, vm *runtime.NitroVM, creator core.Address, b
 		"initial_balances": initial,
 	})
 	codeID := storeCode(t, vm, tokenWASMPath)
-	res, err := vm.Instantiate(codeID, creator, initMsg, "token", nil, testGasLimit, nil)
+	res, _, err := vm.Instantiate(codeID, creator, initMsg, "token", nil, testGasLimit, nil)
 	if err != nil {
 		t.Fatalf("Instantiate token: %v", err)
 	}
@@ -115,7 +115,7 @@ func instantiateEscrow(
 		msg["escrow_code_id"] = *escrowCodeSeq
 	}
 	codeID := storeCode(t, vm, escrowWASMPath)
-	res, err := vm.Instantiate(codeID, creator, mustJSON(t, msg), "escrow", nil, testGasLimit, nil)
+	res, _, err := vm.Instantiate(codeID, creator, mustJSON(t, msg), "escrow", nil, testGasLimit, nil)
 	if err != nil {
 		t.Fatalf("Instantiate escrow: %v", err)
 	}
@@ -226,19 +226,19 @@ func TestEscrow_DepositApproveRelease(t *testing.T) {
 	transferMsg := mustJSON(t, map[string]any{
 		"transfer": map[string]any{"recipient": escrowAddr.Hex(), "amount": "500"},
 	})
-	if _, err := vm.Execute(tokenAddr, buyer, transferMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(tokenAddr, buyer, transferMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatalf("buyer->escrow token transfer: %v", err)
 	}
 
 	// Buyer records deposit in escrow contract.
 	depositMsg := mustJSON(t, map[string]any{"deposit": map[string]any{"amount": "500"}})
-	if _, err := vm.Execute(escrowAddr, buyer, depositMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(escrowAddr, buyer, depositMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatalf("deposit: %v", err)
 	}
 
 	// Arbiter approves -> escrow sends WasmMsg::Execute to token.transfer(seller, 500).
 	approveMsg := mustJSON(t, map[string]any{"approve": map[string]any{}})
-	res, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
+	res, _, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -284,13 +284,13 @@ func TestEscrow_CrossContractQuery(t *testing.T) {
 	transferMsg := mustJSON(t, map[string]any{
 		"transfer": map[string]any{"recipient": escrowAddr.Hex(), "amount": "300"},
 	})
-	if _, err := vm.Execute(tokenAddr, buyer, transferMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(tokenAddr, buyer, transferMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	// CheckBalance calls WasmQuery::Smart on the token contract.
 	checkMsg := mustJSON(t, map[string]any{"check_balance": map[string]any{}})
-	res, err := vm.Execute(escrowAddr, buyer, checkMsg, nil, testGasLimit, nil)
+	res, _, err := vm.Execute(escrowAddr, buyer, checkMsg, nil, testGasLimit, nil)
 	if err != nil {
 		t.Fatalf("check_balance: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestEscrow_CloneViaInstantiate(t *testing.T) {
 		"amount":         "100",
 		"escrow_code_id": seqID,
 	})
-	parentRes, err := vm.Instantiate(escrowCodeID, deployer, initMsg, "escrow-parent", nil, testGasLimit, nil)
+	parentRes, _, err := vm.Instantiate(escrowCodeID, deployer, initMsg, "escrow-parent", nil, testGasLimit, nil)
 	if err != nil {
 		t.Fatalf("Instantiate parent: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestEscrow_CloneViaInstantiate(t *testing.T) {
 			"amount":  "200",
 		},
 	})
-	res, err := vm.Execute(parentRes.ContractAddress, deployer, cloneMsg, nil, testGasLimit, nil)
+	res, _, err := vm.Execute(parentRes.ContractAddress, deployer, cloneMsg, nil, testGasLimit, nil)
 	if err != nil {
 		t.Fatalf("clone_escrow: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestEscrow_MultiHop_CloneThenDeposit(t *testing.T) {
 		"amount":         "1000",
 		"escrow_code_id": seqID,
 	})
-	parentRes, _ := vm.Instantiate(escrowCodeID, deployer, initMsg, "parent", nil, testGasLimit, nil)
+	parentRes, _, _ := vm.Instantiate(escrowCodeID, deployer, initMsg, "parent", nil, testGasLimit, nil)
 
 	// Clone child.
 	cloneMsg := mustJSON(t, map[string]any{
@@ -418,7 +418,7 @@ func TestEscrow_MultiHop_CloneThenDeposit(t *testing.T) {
 			"amount":  "300",
 		},
 	})
-	cloneRes, err := vm.Execute(parentRes.ContractAddress, deployer, cloneMsg, nil, testGasLimit, nil)
+	cloneRes, _, err := vm.Execute(parentRes.ContractAddress, deployer, cloneMsg, nil, testGasLimit, nil)
 	if err != nil {
 		t.Fatalf("clone: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestEscrow_MultiHop_CloneThenDeposit(t *testing.T) {
 
 	// Approve child -> cross-contract execute to token.transfer(outsider, 300).
 	approveMsg := mustJSON(t, map[string]any{"approve": map[string]any{}})
-	if _, err := vm.Execute(childAddr, arbiter, approveMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(childAddr, arbiter, approveMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatalf("approve child: %v", err)
 	}
 
@@ -475,13 +475,13 @@ func TestEscrow_CrossContractErrorPropagation(t *testing.T) {
 
 	// Record deposit WITHOUT actually transferring tokens to escrow.
 	depositMsg := mustJSON(t, map[string]any{"deposit": map[string]any{"amount": "500"}})
-	if _, err := vm.Execute(escrowAddr, buyer, depositMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(escrowAddr, buyer, depositMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatalf("deposit: %v", err)
 	}
 
 	// Approve triggers token.transfer(seller, 500) but escrow has 0 token balance.
 	approveMsg := mustJSON(t, map[string]any{"approve": map[string]any{}})
-	_, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
+	_, _, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected error from cross-contract insufficient funds")
 	}
@@ -510,11 +510,11 @@ func TestEscrow_DoubleApprove(t *testing.T) {
 	mustExec(t, vm, escrowAddr, buyer, depositMsg, nil)
 
 	approveMsg := mustJSON(t, map[string]any{"approve": map[string]any{}})
-	if _, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatalf("first approve: %v", err)
 	}
 
-	_, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
+	_, _, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected error on double approve")
 	}
@@ -539,7 +539,7 @@ func TestEscrow_UnauthorizedApprove(t *testing.T) {
 	mustExec(t, vm, escrowAddr, buyer, depositMsg, nil)
 
 	approveMsg := mustJSON(t, map[string]any{"approve": map[string]any{}})
-	_, err := vm.Execute(escrowAddr, outsider, approveMsg, nil, testGasLimit, nil)
+	_, _, err := vm.Execute(escrowAddr, outsider, approveMsg, nil, testGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected unauthorized error")
 	}
@@ -564,7 +564,7 @@ func TestEscrow_BuyerCanApprove(t *testing.T) {
 	mustExec(t, vm, escrowAddr, buyer, depositMsg, nil)
 
 	approveMsg := mustJSON(t, map[string]any{"approve": map[string]any{}})
-	if _, err := vm.Execute(escrowAddr, buyer, approveMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(escrowAddr, buyer, approveMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatalf("buyer approve: %v", err)
 	}
 
@@ -589,7 +589,7 @@ func TestEscrow_ApproveInsufficientDeposit(t *testing.T) {
 	mustExec(t, vm, escrowAddr, buyer, depositMsg, nil)
 
 	approveMsg := mustJSON(t, map[string]any{"approve": map[string]any{}})
-	_, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
+	_, _, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected not funded error")
 	}
@@ -618,7 +618,7 @@ func TestEscrow_Refund_ByArbiter(t *testing.T) {
 	mustExec(t, vm, escrowAddr, buyer, depositMsg, nil)
 
 	refundMsg := mustJSON(t, map[string]any{"refund": map[string]any{}})
-	if _, err := vm.Execute(escrowAddr, arbiter, refundMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(escrowAddr, arbiter, refundMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatalf("refund: %v", err)
 	}
 
@@ -639,7 +639,7 @@ func TestEscrow_RefundWithoutDeposit(t *testing.T) {
 	_, escrowAddr := instantiateEscrow(t, vm, deployer, tokenAddr, seller, arbiter, "100", nil, nil)
 
 	refundMsg := mustJSON(t, map[string]any{"refund": map[string]any{}})
-	if _, err := vm.Execute(escrowAddr, arbiter, refundMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(escrowAddr, arbiter, refundMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatalf("refund without deposit: %v", err)
 	}
 
@@ -670,7 +670,7 @@ func TestEscrow_RefundAfterExpiry(t *testing.T) {
 
 	// Outsider refund before expiry should fail.
 	refundMsg := mustJSON(t, map[string]any{"refund": map[string]any{}})
-	_, err := vm.Execute(escrowAddr, outsider, refundMsg, nil, testGasLimit, nil)
+	_, _, err := vm.Execute(escrowAddr, outsider, refundMsg, nil, testGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected error before expiry")
 	}
@@ -679,7 +679,7 @@ func TestEscrow_RefundAfterExpiry(t *testing.T) {
 	vm.SetBlockInfo(100, uint64(time.Now().UnixNano())+11_000_000_000)
 
 	// Now outsider can refund.
-	if _, err := vm.Execute(escrowAddr, outsider, refundMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(escrowAddr, outsider, refundMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatalf("refund after expiry: %v", err)
 	}
 
@@ -708,7 +708,7 @@ func TestEscrow_RefundBeforeExpiry_ArbiterAllowed(t *testing.T) {
 	mustExec(t, vm, escrowAddr, buyer, depositMsg, nil)
 
 	refundMsg := mustJSON(t, map[string]any{"refund": map[string]any{}})
-	if _, err := vm.Execute(escrowAddr, arbiter, refundMsg, nil, testGasLimit, nil); err != nil {
+	if _, _, err := vm.Execute(escrowAddr, arbiter, refundMsg, nil, testGasLimit, nil); err != nil {
 		t.Fatalf("arbiter refund before expiry: %v", err)
 	}
 
@@ -738,7 +738,7 @@ func TestEscrow_DepositAfterFinalized(t *testing.T) {
 	approveMsg := mustJSON(t, map[string]any{"approve": map[string]any{}})
 	mustExec(t, vm, escrowAddr, arbiter, approveMsg, nil)
 
-	_, err := vm.Execute(escrowAddr, buyer, depositMsg, nil, testGasLimit, nil)
+	_, _, err := vm.Execute(escrowAddr, buyer, depositMsg, nil, testGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected error depositing after finalization")
 	}
@@ -761,7 +761,7 @@ func TestEscrow_DepositExceedsRequired(t *testing.T) {
 	mustExec(t, vm, tokenAddr, buyer, transferMsg, nil)
 
 	depositMsg := mustJSON(t, map[string]any{"deposit": map[string]any{"amount": "200"}})
-	_, err := vm.Execute(escrowAddr, buyer, depositMsg, nil, testGasLimit, nil)
+	_, _, err := vm.Execute(escrowAddr, buyer, depositMsg, nil, testGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected error for over-deposit")
 	}
@@ -779,7 +779,7 @@ func TestEscrow_ZeroDeposit(t *testing.T) {
 	_, escrowAddr := instantiateEscrow(t, vm, deployer, tokenAddr, seller, arbiter, "100", nil, nil)
 
 	depositMsg := mustJSON(t, map[string]any{"deposit": map[string]any{"amount": "0"}})
-	_, err := vm.Execute(escrowAddr, buyer, depositMsg, nil, testGasLimit, nil)
+	_, _, err := vm.Execute(escrowAddr, buyer, depositMsg, nil, testGasLimit, nil)
 	if err == nil {
 		t.Fatal("expected error for zero deposit")
 	}
@@ -808,7 +808,7 @@ func TestEscrow_EventAggregation(t *testing.T) {
 	mustExec(t, vm, escrowAddr, buyer, depositMsg, nil)
 
 	approveMsg := mustJSON(t, map[string]any{"approve": map[string]any{}})
-	res, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
+	res, _, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -843,7 +843,7 @@ func TestEscrow_GasAcrossCrossContract(t *testing.T) {
 	mustExec(t, vm, escrowAddr, buyer, depositMsg, nil)
 
 	approveMsg := mustJSON(t, map[string]any{"approve": map[string]any{}})
-	res, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
+	res, _, err := vm.Execute(escrowAddr, arbiter, approveMsg, nil, testGasLimit, nil)
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -860,7 +860,7 @@ func TestEscrow_GasAcrossCrossContract(t *testing.T) {
 	depositMsg2 := mustJSON(t, map[string]any{"deposit": map[string]any{"amount": "50"}})
 	mustExec(t, vm, escrowAddr2, buyer, depositMsg2, nil)
 
-	_, err = vm.Execute(escrowAddr2, arbiter, approveMsg, nil, 1, nil)
+	_, _, err = vm.Execute(escrowAddr2, arbiter, approveMsg, nil, 1, nil)
 	if err == nil {
 		t.Error("expected out of gas error with gas limit 1")
 	}

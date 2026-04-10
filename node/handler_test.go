@@ -409,10 +409,10 @@ func TestInstantiate_Signed(t *testing.T) {
 
 	vm := &mockVM{
 		chainID: "nitro-test",
-		instantiateFn: func(codeID []byte, s core.Address, msg []byte, label string, funds []wasmvmtypes.Coin, gasLimit uint64, nonce *uint64) (*core.InstantiateResult, error) {
+		instantiateFn: func(codeID []byte, s core.Address, msg []byte, label string, funds []wasmvmtypes.Coin, gasLimit uint64, nonce *uint64) (*core.InstantiateResult, uint64, error) {
 			capturedCodeID = codeID
 			capturedLabel = label
-			return &core.InstantiateResult{ContractAddress: contractAddr, GasUsed: 3000}, nil
+			return &core.InstantiateResult{ContractAddress: contractAddr, GasUsed: 3000}, 3000, nil
 		},
 	}
 	srv := newTestServer(t, vm)
@@ -458,14 +458,14 @@ func TestExecute_Signed(t *testing.T) {
 
 	vm := &mockVM{
 		chainID: "nitro-test",
-		executeFn: func(contract, s core.Address, msg []byte, funds []wasmvmtypes.Coin, gasLimit uint64, nonce *uint64) (*core.ExecuteResult, error) {
+		executeFn: func(contract, s core.Address, msg []byte, funds []wasmvmtypes.Coin, gasLimit uint64, nonce *uint64) (*core.ExecuteResult, uint64, error) {
 			capturedContract = contract
 			capturedMsg = msg
 			return &core.ExecuteResult{
 				GasUsed:    2000,
 				Data:       []byte("ok"),
 				Attributes: []wasmvmtypes.EventAttribute{{Key: "action", Value: "transfer"}},
-			}, nil
+			}, 2000, nil
 		},
 	}
 	srv := newTestServer(t, vm)
@@ -509,8 +509,8 @@ func TestExecute_WithGasFee(t *testing.T) {
 	var deductCalled bool
 	vm := &mockVM{
 		chainID: "nitro-test",
-		executeFn: func(_ core.Address, _ core.Address, _ []byte, _ []wasmvmtypes.Coin, _ uint64, _ *uint64) (*core.ExecuteResult, error) {
-			return &core.ExecuteResult{GasUsed: 1000}, nil
+		executeFn: func(_ core.Address, _ core.Address, _ []byte, _ []wasmvmtypes.Coin, _ uint64, _ *uint64) (*core.ExecuteResult, uint64, error) {
+			return &core.ExecuteResult{GasUsed: 1000}, 1000, nil
 		},
 		deductGasFeeFn: func(_ core.Address, gasUsed, gasPrice uint64) error {
 			deductCalled = true
@@ -587,8 +587,8 @@ func TestExecute_GasFeeRollback(t *testing.T) {
 	contractAddr, _ := core.HexToAddress("0x0000000000000000000000000000000000000099")
 	vm := &mockVM{
 		chainID: "nitro-test",
-		executeFn: func(_ core.Address, _ core.Address, _ []byte, _ []wasmvmtypes.Coin, _ uint64, _ *uint64) (*core.ExecuteResult, error) {
-			return &core.ExecuteResult{GasUsed: 1000}, nil
+		executeFn: func(_ core.Address, _ core.Address, _ []byte, _ []wasmvmtypes.Coin, _ uint64, _ *uint64) (*core.ExecuteResult, uint64, error) {
+			return &core.ExecuteResult{GasUsed: 1000}, 1000, nil
 		},
 		deductGasFeeFn: func(_ core.Address, _, _ uint64) error {
 			return core.ErrInsufficientFunds
@@ -617,9 +617,9 @@ func TestExecute_GasFeeRollback(t *testing.T) {
 func TestSimulate_Execute(t *testing.T) {
 	var executeCalled bool
 	vm := &mockVM{
-		executeFn: func(_ core.Address, _ core.Address, _ []byte, _ []wasmvmtypes.Coin, _ uint64, _ *uint64) (*core.ExecuteResult, error) {
+		executeFn: func(_ core.Address, _ core.Address, _ []byte, _ []wasmvmtypes.Coin, _ uint64, _ *uint64) (*core.ExecuteResult, uint64, error) {
 			executeCalled = true
-			return &core.ExecuteResult{GasUsed: 3000, Data: []byte("sim")}, nil
+			return &core.ExecuteResult{GasUsed: 3000, Data: []byte("sim")}, 3000, nil
 		},
 	}
 	srv := newTestServer(t, vm)
@@ -656,8 +656,8 @@ func TestSimulate_Execute(t *testing.T) {
 func TestSimulate_Instantiate(t *testing.T) {
 	contractAddr, _ := core.HexToAddress("0x00000000000000000000000000000000deadbeef")
 	vm := &mockVM{
-		instantiateFn: func(_ []byte, _ core.Address, _ []byte, _ string, _ []wasmvmtypes.Coin, _ uint64, _ *uint64) (*core.InstantiateResult, error) {
-			return &core.InstantiateResult{ContractAddress: contractAddr, GasUsed: 4000}, nil
+		instantiateFn: func(_ []byte, _ core.Address, _ []byte, _ string, _ []wasmvmtypes.Coin, _ uint64, _ *uint64) (*core.InstantiateResult, uint64, error) {
+			return &core.InstantiateResult{ContractAddress: contractAddr, GasUsed: 4000}, 4000, nil
 		},
 	}
 	srv := newTestServer(t, vm)
@@ -990,6 +990,131 @@ func TestRestore_CodeSeq(t *testing.T) {
 	}
 	if capturedSeq != 3 {
 		t.Errorf("SetCodeSeq = %d, want 3", capturedSeq)
+	}
+}
+
+// TestExecute_SubMessageTransferBalanceNotPersisted demonstrates that when a
+// contract execution triggers a BankMsg::Send to a third-party address (not
+// the sender or the target contract), the recipient's balance is updated
+// in-memory but never persisted to SQLite. On server restart the funds vanish.
+func TestExecute_SubMessageTransferBalanceNotPersisted(t *testing.T) {
+	key := testKey(t)
+	sender := crypto.DeriveAddress(key)
+	contract, _ := core.HexToAddress("0x00000000000000000000000000000000deadbeef")
+	recipient, _ := core.HexToAddress("0x0000000000000000000000000000000000000099")
+
+	vm := &mockVM{
+		balances: map[core.Address]core.Amount{
+			sender:   core.NewAmount(1_000_000),
+			contract: core.NewAmount(500_000),
+		},
+		nonces:  map[core.Address]uint64{sender: 0},
+		chainID: "nitro-test",
+	}
+
+	// Simulate a contract whose execute dispatches BankMsg::Send,
+	// transferring 1000 from the contract to a third-party recipient.
+	vm.executeFn = func(c, s core.Address, msg []byte, funds []wasmvmtypes.Coin, gl uint64, nonce *uint64) (*core.ExecuteResult, uint64, error) {
+		vm.SetBalance(contract, core.NewAmount(499_000))
+		vm.SetBalance(recipient, core.NewAmount(1_000))
+		return &core.ExecuteResult{GasUsed: 5000}, 5000, nil
+	}
+
+	srv := newTestServer(t, vm)
+	h := srv.Handler()
+
+	tx := &crypto.Transaction{
+		ChainID:  "nitro-test",
+		Nonce:    0,
+		GasLimit: 100_000,
+		Type:     crypto.TxExecute,
+		Contract: contract,
+		Msg:      []byte(`{"transfer":{}}`),
+	}
+
+	w := signAndPost(t, h, "/execute", tx, key)
+	if w.Code != 200 {
+		t.Fatalf("execute failed: status %d, body %s", w.Code, w.Body.String())
+	}
+
+	// In-memory: the VM knows recipient has 1000.
+	if bal := vm.GetBalance(recipient); !bal.Equal(core.NewAmount(1_000)) {
+		t.Fatalf("in-memory recipient balance = %s, want 1000", bal.String())
+	}
+
+	// Persistence: recipient balance must be in SQLite so it survives restart.
+	var balStr string
+	err := srv.db.QueryRow(
+		"SELECT balance FROM accounts WHERE address = ?", recipient.Hex(),
+	).Scan(&balStr)
+	if err != nil {
+		t.Fatalf("recipient balance not persisted to SQLite: %v (funds lost on restart)", err)
+	}
+	if balStr != "1000" {
+		t.Errorf("persisted recipient balance = %s, want 1000", balStr)
+	}
+}
+
+// TestInstantiate_SubMessageTransferBalancePersisted verifies that the
+// instantiate handler persists balances for third-party addresses modified
+// by sub-message dispatch during contract instantiation.
+func TestInstantiate_SubMessageTransferBalancePersisted(t *testing.T) {
+	key := testKey(t)
+	sender := crypto.DeriveAddress(key)
+	contractAddr, _ := core.HexToAddress("0x00000000000000000000000000000000deadbeef")
+	recipient, _ := core.HexToAddress("0x00000000000000000000000000000000000000aa")
+
+	vm := &mockVM{
+		balances: map[core.Address]core.Amount{
+			sender: core.NewAmount(1_000_000),
+		},
+		nonces:  map[core.Address]uint64{sender: 0},
+		chainID: "nitro-test",
+	}
+
+	codeID := []byte{0xab, 0xcd}
+
+	// Simulate an instantiation whose init handler dispatches BankMsg::Send
+	// to a third-party recipient.
+	vm.instantiateFn = func(cID []byte, s core.Address, msg []byte, label string, funds []wasmvmtypes.Coin, gl uint64, nonce *uint64) (*core.InstantiateResult, uint64, error) {
+		vm.SetBalance(contractAddr, core.NewAmount(2_000))
+		vm.SetBalance(recipient, core.NewAmount(500))
+		return &core.InstantiateResult{ContractAddress: contractAddr, GasUsed: 3000}, 3000, nil
+	}
+
+	srv := newTestServer(t, vm)
+	h := srv.Handler()
+
+	tx := &crypto.Transaction{
+		ChainID:  "nitro-test",
+		Nonce:    0,
+		GasLimit: 100_000,
+		Type:     crypto.TxInstantiate,
+		CodeID:   codeID,
+		Msg:      []byte(`{}`),
+		Label:    "test",
+	}
+
+	w := signAndPost(t, h, "/instantiate", tx, key)
+	if w.Code != 200 {
+		t.Fatalf("instantiate failed: status %d, body %s", w.Code, w.Body.String())
+	}
+
+	// In-memory: the VM knows recipient has 500.
+	if bal := vm.GetBalance(recipient); !bal.Equal(core.NewAmount(500)) {
+		t.Fatalf("in-memory recipient balance = %s, want 500", bal.String())
+	}
+
+	// Persistence: recipient balance must be in SQLite so it survives restart.
+	var balStr string
+	err := srv.db.QueryRow(
+		"SELECT balance FROM accounts WHERE address = ?", recipient.Hex(),
+	).Scan(&balStr)
+	if err != nil {
+		t.Fatalf("recipient balance not persisted to SQLite: %v (funds lost on restart)", err)
+	}
+	if balStr != "500" {
+		t.Errorf("persisted recipient balance = %s, want 500", balStr)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	wasmvmtypes "github.com/CosmWasm/wasmvm/v2/types"
@@ -78,6 +79,7 @@ type Server struct {
 	network     Network
 	minGasPrice uint64
 	httpSrv     *http.Server
+	writeMu     sync.Mutex // serializes state-changing operations (nonce safety)
 }
 
 // New creates a new Server. Opens databases, creates the VM, and restores state.
@@ -200,7 +202,9 @@ func (s *Server) deductGasFee(dbTx dbExecer, sender core.Address, gasUsed, gasPr
 		return "", err
 	}
 	fee := core.NewAmount(gasUsed).Mul(core.NewAmount(gasPrice))
-	s.persistBalance(dbTx, sender)
+	if err := s.persistBalance(dbTx, sender); err != nil {
+		return "", fmt.Errorf("persist gas fee balance: %w", err)
+	}
 	return fee.String(), nil
 }
 

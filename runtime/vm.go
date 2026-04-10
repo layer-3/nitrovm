@@ -44,6 +44,7 @@ type NitroVM struct {
 	blockTime   uint64 // unix nanoseconds
 
 	instanceCount uint64
+	touched       map[core.Address]struct{} // addresses modified since last drain
 	mu            sync.RWMutex
 
 	// replyFn invokes the reply entry point on a contract. Defaults to
@@ -82,6 +83,7 @@ func New(cfg core.Config, store storage.StorageAdapter) (*NitroVM, error) {
 		seqByCode:   make(map[string]uint64),
 		blockHeight: 1,
 		blockTime:   uint64(time.Now().UnixNano()),
+		touched:     make(map[core.Address]struct{}),
 	}
 	n.replyFn = n.defaultReply
 	return n, nil
@@ -129,6 +131,7 @@ func (n *NitroVM) StoreCode(code []byte, sender *core.Address, nonce *uint64) ([
 	}
 	if sender != nil && nonce != nil {
 		n.getOrCreateAccount(*sender).Nonce++
+		n.markTouched(*sender)
 	}
 	n.mu.Unlock()
 
@@ -137,6 +140,7 @@ func (n *NitroVM) StoreCode(code []byte, sender *core.Address, nonce *uint64) ([
 
 // Instantiate creates a new contract instance from a stored code ID.
 // If nonce is non-nil, it must match the sender's current nonce.
+// Returns gasUsed even on error so callers can charge gas fees on failure.
 func (n *NitroVM) Instantiate(
 	codeID []byte,
 	sender core.Address,
@@ -145,11 +149,23 @@ func (n *NitroVM) Instantiate(
 	funds []wasmvmtypes.Coin,
 	gasLimit uint64,
 	nonce *uint64,
-) (*core.InstantiateResult, error) {
+) (*core.InstantiateResult, uint64, error) {
 	if err := n.validateNonce(sender, nonce); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return n.instantiateInternal(codeID, sender, msg, label, funds, gasLimit, 0)
+	res, gasUsed, err := n.instantiateInternal(codeID, sender, msg, label, funds, gasLimit, 0)
+	if err != nil {
+		return nil, gasUsed, err
+	}
+	// Increment sender nonce only for signed transactions (nonce != nil)
+	// and only in the public entry point, not sub-message dispatch.
+	if nonce != nil {
+		n.mu.Lock()
+		n.getOrCreateAccount(sender).Nonce++
+		n.markTouched(sender)
+		n.mu.Unlock()
+	}
+	return res, gasUsed, nil
 }
 
 func (n *NitroVM) instantiateInternal(
@@ -160,12 +176,12 @@ func (n *NitroVM) instantiateInternal(
 	funds []wasmvmtypes.Coin,
 	gasLimit uint64,
 	depth int,
-) (*core.InstantiateResult, error) {
+) (*core.InstantiateResult, uint64, error) {
 	n.mu.Lock()
 	checksum, ok := n.codes[hex.EncodeToString(codeID)]
 	if !ok {
 		n.mu.Unlock()
-		return nil, core.ErrCodeNotFound
+		return nil, 0, core.ErrCodeNotFound
 	}
 
 	n.instanceCount++
@@ -176,7 +192,7 @@ func (n *NitroVM) instantiateInternal(
 		delete(n.contracts, addr)
 		n.instanceCount--
 		n.mu.Unlock()
-		return nil, err
+		return nil, 0, err
 	}
 	n.mu.Unlock()
 
@@ -189,20 +205,16 @@ func (n *NitroVM) instantiateInternal(
 
 	result, gasUsed, err := n.vm.Instantiate(checksum, env, info, msg, store, n.api, querier, gasMeter, gasLimit, deserCost)
 	if store.err != nil {
-		return nil, fmt.Errorf("%w: %v", core.ErrStorageError, store.err)
+		return nil, gasUsed, fmt.Errorf("%w: %v", core.ErrStorageError, store.err)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("instantiate: %w", err)
+		return nil, gasUsed, fmt.Errorf("instantiate: %w", err)
 	}
 	if result.Err != "" {
-		return nil, fmt.Errorf("%w: %s", core.ErrContractError, result.Err)
+		return nil, gasUsed, fmt.Errorf("%w: %s", core.ErrContractError, result.Err)
 	}
 
-	// Increment sender nonce on successful instantiation.
-	n.mu.Lock()
-	n.getOrCreateAccount(sender).Nonce++
-	n.mu.Unlock()
-
+	totalGasUsed := gasUsed
 	res := &core.InstantiateResult{
 		ContractAddress: addr,
 		GasUsed:         gasUsed,
@@ -212,34 +224,50 @@ func (n *NitroVM) instantiateInternal(
 		res.Attributes = result.Ok.Attributes
 		res.Events = result.Ok.Events
 
-		// Dispatch sub-messages returned by the instantiate handler.
+		// Dispatch sub-messages with remaining gas budget.
 		if len(result.Ok.Messages) > 0 {
-			dr, err := n.dispatchMessages(addr, result.Ok.Messages, gasLimit, depth)
+			remaining := safeSubGas(gasLimit, gasUsed)
+			dr, err := n.dispatchMessages(addr, result.Ok.Messages, remaining, depth)
 			if err != nil {
-				return nil, fmt.Errorf("dispatch: %w", err)
+				return nil, totalGasUsed + dr.GasUsed, fmt.Errorf("dispatch: %w", err)
 			}
+			totalGasUsed += dr.GasUsed
+			res.GasUsed = totalGasUsed
 			res.Events = append(res.Events, dr.Events...)
 			if dr.DataOverride != nil {
 				res.Data = *dr.DataOverride
 			}
 		}
 	}
-	return res, nil
+	return res, totalGasUsed, nil
 }
 
 // Execute calls a contract function.
 // If nonce is non-nil, it must match the sender's current nonce.
+// Returns gasUsed even on error so callers can charge gas fees on failure.
 func (n *NitroVM) Execute(
 	contract, sender core.Address,
 	msg []byte,
 	funds []wasmvmtypes.Coin,
 	gasLimit uint64,
 	nonce *uint64,
-) (*core.ExecuteResult, error) {
+) (*core.ExecuteResult, uint64, error) {
 	if err := n.validateNonce(sender, nonce); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return n.executeInternal(contract, sender, msg, funds, gasLimit, 0)
+	res, gasUsed, err := n.executeInternal(contract, sender, msg, funds, gasLimit, 0)
+	if err != nil {
+		return nil, gasUsed, err
+	}
+	// Increment sender nonce only for signed transactions (nonce != nil)
+	// and only in the public entry point, not sub-message dispatch.
+	if nonce != nil {
+		n.mu.Lock()
+		n.getOrCreateAccount(sender).Nonce++
+		n.markTouched(sender)
+		n.mu.Unlock()
+	}
+	return res, gasUsed, nil
 }
 
 func (n *NitroVM) executeInternal(
@@ -248,12 +276,12 @@ func (n *NitroVM) executeInternal(
 	funds []wasmvmtypes.Coin,
 	gasLimit uint64,
 	depth int,
-) (*core.ExecuteResult, error) {
+) (*core.ExecuteResult, uint64, error) {
 	n.mu.RLock()
 	ci, ok := n.contracts[contract]
 	if !ok {
 		n.mu.RUnlock()
-		return nil, core.ErrContractNotFound
+		return nil, 0, core.ErrContractNotFound
 	}
 	checksum := ci.Checksum
 	n.mu.RUnlock()
@@ -262,7 +290,7 @@ func (n *NitroVM) executeInternal(
 		n.mu.Lock()
 		if err := n.transferFunds(sender, contract, funds); err != nil {
 			n.mu.Unlock()
-			return nil, err
+			return nil, 0, err
 		}
 		n.mu.Unlock()
 	}
@@ -276,39 +304,38 @@ func (n *NitroVM) executeInternal(
 
 	result, gasUsed, err := n.vm.Execute(checksum, env, info, msg, store, n.api, querier, gasMeter, gasLimit, deserCost)
 	if store.err != nil {
-		return nil, fmt.Errorf("%w: %v", core.ErrStorageError, store.err)
+		return nil, gasUsed, fmt.Errorf("%w: %v", core.ErrStorageError, store.err)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("execute: %w", err)
+		return nil, gasUsed, fmt.Errorf("execute: %w", err)
 	}
 	if result.Err != "" {
-		return nil, fmt.Errorf("%w: %s", core.ErrContractError, result.Err)
+		return nil, gasUsed, fmt.Errorf("%w: %s", core.ErrContractError, result.Err)
 	}
 
-	// Track sender nonce on successful execution.
-	n.mu.Lock()
-	n.getOrCreateAccount(sender).Nonce++
-	n.mu.Unlock()
-
+	totalGasUsed := gasUsed
 	res := &core.ExecuteResult{GasUsed: gasUsed}
 	if result.Ok != nil {
 		res.Data = result.Ok.Data
 		res.Attributes = result.Ok.Attributes
 		res.Events = result.Ok.Events
 
-		// Dispatch sub-messages.
+		// Dispatch sub-messages with remaining gas budget.
 		if len(result.Ok.Messages) > 0 {
-			dr, err := n.dispatchMessages(contract, result.Ok.Messages, gasLimit, depth)
+			remaining := safeSubGas(gasLimit, gasUsed)
+			dr, err := n.dispatchMessages(contract, result.Ok.Messages, remaining, depth)
 			if err != nil {
-				return nil, fmt.Errorf("dispatch: %w", err)
+				return nil, totalGasUsed + dr.GasUsed, fmt.Errorf("dispatch: %w", err)
 			}
+			totalGasUsed += dr.GasUsed
+			res.GasUsed = totalGasUsed
 			res.Events = append(res.Events, dr.Events...)
 			if dr.DataOverride != nil {
 				res.Data = *dr.DataOverride
 			}
 		}
 	}
-	return res, nil
+	return res, totalGasUsed, nil
 }
 
 // Query performs a read-only contract query.
@@ -357,6 +384,7 @@ func (n *NitroVM) SetBalance(addr core.Address, balance core.Amount) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.getOrCreateAccount(addr).Balance = balance
+	n.markTouched(addr)
 }
 
 // SetBlockInfo updates the current block context.
@@ -463,6 +491,7 @@ func (n *NitroVM) SetNonce(addr core.Address, nonce uint64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.getOrCreateAccount(addr).Nonce = nonce
+	n.markTouched(addr)
 }
 
 // GetCodeSeq returns the sequential code ID for a given hex checksum.
@@ -487,6 +516,15 @@ const maxDispatchDepth = 10
 type dispatchResult struct {
 	Events       []wasmvmtypes.Event
 	DataOverride *[]byte // non-nil if a reply handler set Data
+	GasUsed      uint64  // aggregate gas consumed by all sub-messages and replies
+}
+
+// safeSubGas returns a - b, clamped to 0 on underflow.
+func safeSubGas(a, b uint64) uint64 {
+	if b >= a {
+		return 0
+	}
+	return a - b
 }
 
 // defaultReply invokes the reply entry point via wasmvm.
@@ -506,6 +544,7 @@ func (n *NitroVM) defaultReply(
 // dispatchMessages processes sub-messages returned by contract execution.
 // Handles ReplyOn semantics: invokes the calling contract's reply entry point
 // based on the sub-message's ReplyOn mode and dispatch outcome.
+// gasLimit is the remaining gas budget for all sub-messages combined.
 func (n *NitroVM) dispatchMessages(
 	contractAddr core.Address,
 	msgs []wasmvmtypes.SubMsg,
@@ -513,10 +552,11 @@ func (n *NitroVM) dispatchMessages(
 	depth int,
 ) (*dispatchResult, error) {
 	if depth >= maxDispatchDepth {
-		return nil, core.ErrMaxDispatchDepth
+		return &dispatchResult{}, core.ErrMaxDispatchDepth
 	}
 
 	dr := &dispatchResult{}
+	remaining := gasLimit
 	for i, sub := range msgs {
 		canCatchError := sub.ReplyOn == wasmvmtypes.ReplyError || sub.ReplyOn == wasmvmtypes.ReplyAlways
 
@@ -529,12 +569,14 @@ func (n *NitroVM) dispatchMessages(
 			if t, ok := n.storage.(storage.TransactionalStore); ok {
 				ts = t
 				if err := ts.Savepoint(spName); err != nil {
-					return nil, fmt.Errorf("savepoint: %w", err)
+					return dr, fmt.Errorf("savepoint: %w", err)
 				}
 			}
 		}
 
-		subEvents, subData, dispatchErr := n.dispatchSingleMessage(contractAddr, sub.Msg, gasLimit, depth)
+		subEvents, subData, subGasUsed, dispatchErr := n.dispatchSingleMessage(contractAddr, sub.Msg, remaining, depth)
+		dr.GasUsed += subGasUsed
+		remaining = safeSubGas(remaining, subGasUsed)
 
 		if dispatchErr != nil {
 			if canCatchError {
@@ -550,9 +592,11 @@ func (n *NitroVM) dispatchMessages(
 					Payload: sub.Payload,
 					Result:  wasmvmtypes.SubMsgResult{Err: dispatchErr.Error()},
 				}
-				replyEvents, replyData, err := n.invokeReply(contractAddr, reply, gasLimit, depth)
+				replyEvents, replyData, replyGasUsed, err := n.invokeReply(contractAddr, reply, remaining, depth)
+				dr.GasUsed += replyGasUsed
+				remaining = safeSubGas(remaining, replyGasUsed)
 				if err != nil {
-					return nil, err
+					return dr, err
 				}
 				dr.Events = append(dr.Events, replyEvents...)
 				if replyData != nil {
@@ -560,7 +604,7 @@ func (n *NitroVM) dispatchMessages(
 				}
 			} else {
 				// ReplyNever or ReplySuccess: error aborts.
-				return nil, dispatchErr
+				return dr, dispatchErr
 			}
 		} else {
 			// Success path.
@@ -579,9 +623,11 @@ func (n *NitroVM) dispatchMessages(
 						},
 					},
 				}
-				replyEvents, replyData, err := n.invokeReply(contractAddr, reply, gasLimit, depth)
+				replyEvents, replyData, replyGasUsed, err := n.invokeReply(contractAddr, reply, remaining, depth)
+				dr.GasUsed += replyGasUsed
+				remaining = safeSubGas(remaining, replyGasUsed)
 				if err != nil {
-					return nil, err
+					return dr, err
 				}
 				dr.Events = append(dr.Events, subEvents...)
 				dr.Events = append(dr.Events, replyEvents...)
@@ -598,25 +644,25 @@ func (n *NitroVM) dispatchMessages(
 }
 
 // dispatchSingleMessage dispatches one sub-message and returns its events,
-// response data, and any error.
+// response data, gas consumed, and any error.
 func (n *NitroVM) dispatchSingleMessage(
 	contractAddr core.Address,
 	msg wasmvmtypes.CosmosMsg,
 	gasLimit uint64,
 	depth int,
-) (events []wasmvmtypes.Event, data []byte, err error) {
+) (events []wasmvmtypes.Event, data []byte, gasUsed uint64, err error) {
 	switch {
 	case msg.Bank != nil && msg.Bank.Send != nil:
 		send := msg.Bank.Send
 		to, addrErr := core.HexToAddress(send.ToAddress)
 		if addrErr != nil {
-			return nil, nil, fmt.Errorf("dispatch bank send: bad address: %w", addrErr)
+			return nil, nil, 0, fmt.Errorf("dispatch bank send: bad address: %w", addrErr)
 		}
 		n.mu.Lock()
 		txErr := n.transferFunds(contractAddr, to, toCoins(send.Amount))
 		n.mu.Unlock()
 		if txErr != nil {
-			return nil, nil, fmt.Errorf("dispatch bank send: %w", txErr)
+			return nil, nil, 0, fmt.Errorf("dispatch bank send: %w", txErr)
 		}
 		events = append(events, wasmvmtypes.Event{
 			Type: "transfer",
@@ -626,17 +672,17 @@ func (n *NitroVM) dispatchSingleMessage(
 				{Key: "amount", Value: coinString(send.Amount)},
 			},
 		})
-		return events, nil, nil
+		return events, nil, 0, nil
 
 	case msg.Wasm != nil && msg.Wasm.Execute != nil:
 		wmsg := msg.Wasm.Execute
 		target, addrErr := core.HexToAddress(wmsg.ContractAddr)
 		if addrErr != nil {
-			return nil, nil, fmt.Errorf("dispatch wasm execute: bad address: %w", addrErr)
+			return nil, nil, 0, fmt.Errorf("dispatch wasm execute: bad address: %w", addrErr)
 		}
-		subRes, execErr := n.executeInternal(target, contractAddr, wmsg.Msg, toCoins(wmsg.Funds), gasLimit, depth+1)
+		subRes, subGasUsed, execErr := n.executeInternal(target, contractAddr, wmsg.Msg, toCoins(wmsg.Funds), gasLimit, depth+1)
 		if execErr != nil {
-			return nil, nil, fmt.Errorf("dispatch wasm execute: %w", execErr)
+			return nil, nil, subGasUsed, fmt.Errorf("dispatch wasm execute: %w", execErr)
 		}
 		if len(subRes.Attributes) > 0 {
 			events = append(events, wasmvmtypes.Event{
@@ -645,7 +691,7 @@ func (n *NitroVM) dispatchSingleMessage(
 			})
 		}
 		events = append(events, subRes.Events...)
-		return events, subRes.Data, nil
+		return events, subRes.Data, subGasUsed, nil
 
 	case msg.Wasm != nil && msg.Wasm.Instantiate != nil:
 		imsg := msg.Wasm.Instantiate
@@ -653,11 +699,11 @@ func (n *NitroVM) dispatchSingleMessage(
 		checksum, ok := n.codeBySeq[imsg.CodeID]
 		n.mu.RUnlock()
 		if !ok {
-			return nil, nil, fmt.Errorf("dispatch wasm instantiate: code_id %d not found", imsg.CodeID)
+			return nil, nil, 0, fmt.Errorf("dispatch wasm instantiate: code_id %d not found", imsg.CodeID)
 		}
-		res, instErr := n.instantiateInternal([]byte(checksum), contractAddr, imsg.Msg, imsg.Label, toCoins(imsg.Funds), gasLimit, depth)
+		res, subGasUsed, instErr := n.instantiateInternal([]byte(checksum), contractAddr, imsg.Msg, imsg.Label, toCoins(imsg.Funds), gasLimit, depth+1)
 		if instErr != nil {
-			return nil, nil, fmt.Errorf("dispatch wasm instantiate: %w", instErr)
+			return nil, nil, subGasUsed, fmt.Errorf("dispatch wasm instantiate: %w", instErr)
 		}
 		events = append(events, wasmvmtypes.Event{
 			Type: "instantiate",
@@ -673,10 +719,10 @@ func (n *NitroVM) dispatchSingleMessage(
 			})
 		}
 		events = append(events, res.Events...)
-		return events, res.Data, nil
+		return events, res.Data, subGasUsed, nil
 
 	default:
-		return nil, nil, fmt.Errorf("%w: only bank.send, wasm.execute, and wasm.instantiate are supported", core.ErrUnsupportedMsg)
+		return nil, nil, 0, fmt.Errorf("%w: only bank.send, wasm.execute, and wasm.instantiate are supported", core.ErrUnsupportedMsg)
 	}
 }
 
@@ -687,12 +733,12 @@ func (n *NitroVM) invokeReply(
 	reply wasmvmtypes.Reply,
 	gasLimit uint64,
 	depth int,
-) (events []wasmvmtypes.Event, dataOverride *[]byte, err error) {
+) (events []wasmvmtypes.Event, dataOverride *[]byte, gasUsed uint64, err error) {
 	n.mu.RLock()
 	ci, ok := n.contracts[contractAddr]
 	if !ok {
 		n.mu.RUnlock()
-		return nil, nil, core.ErrContractNotFound
+		return nil, nil, 0, core.ErrContractNotFound
 	}
 	checksum := ci.Checksum
 	n.mu.RUnlock()
@@ -700,12 +746,13 @@ func (n *NitroVM) invokeReply(
 	env := n.makeEnv(contractAddr)
 	store := newContractKVStore(contractAddr, n.storage)
 
-	result, _, replyErr := n.replyFn(checksum, env, reply, store, gasLimit)
+	result, replyGasUsed, replyErr := n.replyFn(checksum, env, reply, store, gasLimit)
+	gasUsed = replyGasUsed
 	if replyErr != nil {
-		return nil, nil, fmt.Errorf("%w: %v", core.ErrReplyFailed, replyErr)
+		return nil, nil, gasUsed, fmt.Errorf("%w: %v", core.ErrReplyFailed, replyErr)
 	}
 	if result.Err != "" {
-		return nil, nil, fmt.Errorf("%w: %s", core.ErrReplyFailed, result.Err)
+		return nil, nil, gasUsed, fmt.Errorf("%w: %s", core.ErrReplyFailed, result.Err)
 	}
 
 	if result.Ok != nil {
@@ -724,9 +771,11 @@ func (n *NitroVM) invokeReply(
 
 		// Recursively dispatch sub-messages returned by the reply handler.
 		if len(result.Ok.Messages) > 0 {
-			dr, dispatchErr := n.dispatchMessages(contractAddr, result.Ok.Messages, gasLimit, depth+1)
+			remaining := safeSubGas(gasLimit, gasUsed)
+			dr, dispatchErr := n.dispatchMessages(contractAddr, result.Ok.Messages, remaining, depth+1)
+			gasUsed += dr.GasUsed
 			if dispatchErr != nil {
-				return nil, nil, fmt.Errorf("reply dispatch: %w", dispatchErr)
+				return nil, nil, gasUsed, fmt.Errorf("reply dispatch: %w", dispatchErr)
 			}
 			events = append(events, dr.Events...)
 			if dr.DataOverride != nil {
@@ -734,7 +783,7 @@ func (n *NitroVM) invokeReply(
 			}
 		}
 	}
-	return events, dataOverride, nil
+	return events, dataOverride, gasUsed, nil
 }
 
 // toCoins converts wasmvmtypes.Array[Coin] to []Coin.
@@ -769,6 +818,7 @@ func (n *NitroVM) DeductGasFee(sender core.Address, gasUsed, gasPrice uint64) er
 		return core.ErrInsufficientFunds
 	}
 	acct.Balance = newBal
+	n.markTouched(sender)
 	return nil
 }
 
@@ -783,6 +833,7 @@ type vmSnapshot struct {
 	codeSeq       uint64
 	codeBySeq     map[uint64]cosmwasm.Checksum
 	seqByCode     map[string]uint64
+	touched       map[core.Address]struct{}
 	instanceCount uint64
 	blockHeight   uint64
 	blockTime     uint64
@@ -803,6 +854,7 @@ func (n *NitroVM) Snapshot() any {
 	contracts := make(map[core.Address]*contractMeta, len(n.contracts))
 	for k, v := range n.contracts {
 		cp := *v
+		cp.Checksum = append(cosmwasm.Checksum(nil), v.Checksum...)
 		contracts[k] = &cp
 	}
 	codes := make(map[string]cosmwasm.Checksum, len(n.codes))
@@ -817,6 +869,10 @@ func (n *NitroVM) Snapshot() any {
 	for k, v := range n.seqByCode {
 		seqByCode[k] = v
 	}
+	touched := make(map[core.Address]struct{}, len(n.touched))
+	for k := range n.touched {
+		touched[k] = struct{}{}
+	}
 
 	return vmSnapshot{
 		accounts:      accts,
@@ -825,6 +881,7 @@ func (n *NitroVM) Snapshot() any {
 		codeSeq:       n.codeSeq,
 		codeBySeq:     codeBySeq,
 		seqByCode:     seqByCode,
+		touched:       touched,
 		instanceCount: n.instanceCount,
 		blockHeight:   n.blockHeight,
 		blockTime:     n.blockTime,
@@ -842,6 +899,7 @@ func (n *NitroVM) Restore(snap any) {
 	n.codeSeq = s.codeSeq
 	n.codeBySeq = s.codeBySeq
 	n.seqByCode = s.seqByCode
+	n.touched = s.touched
 	n.instanceCount = s.instanceCount
 	n.blockHeight = s.blockHeight
 	n.blockTime = s.blockTime
@@ -889,8 +947,27 @@ func (n *NitroVM) transferFunds(from, to core.Address, funds []wasmvmtypes.Coin)
 		toAcct := n.getOrCreateAccount(to)
 		fromAcct.Balance = newFromBal
 		toAcct.Balance = toAcct.Balance.Add(amt)
+		n.markTouched(from)
+		n.markTouched(to)
 	}
 	return nil
+}
+
+// markTouched records that addr was modified. Caller must hold n.mu.
+func (n *NitroVM) markTouched(addr core.Address) {
+	n.touched[addr] = struct{}{}
+}
+
+// TouchedAddresses returns all addresses modified since the last call and clears the set.
+func (n *NitroVM) TouchedAddresses() []core.Address {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	addrs := make([]core.Address, 0, len(n.touched))
+	for addr := range n.touched {
+		addrs = append(addrs, addr)
+	}
+	n.touched = make(map[core.Address]struct{})
+	return addrs
 }
 
 func (n *NitroVM) getOrCreateAccount(addr core.Address) *core.Account {

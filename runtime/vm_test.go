@@ -79,6 +79,7 @@ func testVMInternal(t *testing.T) *NitroVM {
 		codes:     make(map[string]cosmwasm.Checksum),
 		codeBySeq: make(map[uint64]cosmwasm.Checksum),
 		seqByCode: make(map[string]uint64),
+		touched:   make(map[core.Address]struct{}),
 		storage:   memory.New(),
 	}
 	// Default: reply returns an error (no wasm VM in unit tests).
@@ -296,7 +297,7 @@ func TestNonceValidation(t *testing.T) {
 
 	// Execute with wrong nonce should fail before touching wasmvm.
 	wrongNonce := uint64(3)
-	_, err := vm.Execute(contract, sender, []byte(`{}`), nil, 1_000_000, &wrongNonce)
+	_, _, err := vm.Execute(contract, sender, []byte(`{}`), nil, 1_000_000, &wrongNonce)
 	if err == nil {
 		t.Fatal("expected ErrInvalidNonce")
 	}
@@ -305,14 +306,14 @@ func TestNonceValidation(t *testing.T) {
 	}
 
 	// Execute with nil nonce should pass nonce check (and fail later on missing contract).
-	_, err = vm.Execute(contract, sender, []byte(`{}`), nil, 1_000_000, nil)
+	_, _, err = vm.Execute(contract, sender, []byte(`{}`), nil, 1_000_000, nil)
 	if !errors.Is(err, core.ErrContractNotFound) {
 		t.Errorf("nil nonce should skip validation; error = %v, want ErrContractNotFound", err)
 	}
 
 	// Instantiate with wrong nonce.
 	wrongNonce = uint64(0)
-	_, err = vm.Instantiate([]byte("nonexistent"), sender, []byte(`{}`), "test", nil, 1_000_000, &wrongNonce)
+	_, _, err = vm.Instantiate([]byte("nonexistent"), sender, []byte(`{}`), "test", nil, 1_000_000, &wrongNonce)
 	if !errors.Is(err, core.ErrInvalidNonce) {
 		t.Errorf("error = %v, want ErrInvalidNonce", err)
 	}

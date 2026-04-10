@@ -156,6 +156,10 @@ func (s *Server) restore() error {
 		}
 	}
 
+	// Drain the touched set so that SetBalance/SetNonce calls above
+	// don't pollute the first real execution's dirty tracking.
+	s.vm.TouchedAddresses()
+
 	return nil
 }
 
