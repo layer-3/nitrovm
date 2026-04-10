@@ -1,11 +1,10 @@
-package nitrovm
+package core
 
 import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"strings"
 )
 
 // Address is a 20-byte EVM-style account/contract identifier.
@@ -14,10 +13,17 @@ type Address [20]byte
 // ZeroAddress is the zero-value address.
 var ZeroAddress Address
 
+// TrimHexPrefix removes an optional "0x" or "0X" prefix from a hex string.
+func TrimHexPrefix(s string) string {
+	if len(s) >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
+		return s[2:]
+	}
+	return s
+}
+
 // HexToAddress converts a hex string (with or without 0x prefix) to an Address.
 func HexToAddress(s string) (Address, error) {
-	s = strings.TrimPrefix(s, "0x")
-	s = strings.TrimPrefix(s, "0X")
+	s = TrimHexPrefix(s)
 	if len(s) != 40 {
 		return Address{}, fmt.Errorf("invalid address length: got %d hex chars, want 40", len(s))
 	}

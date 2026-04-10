@@ -1,4 +1,4 @@
-package nitrovm
+package core
 
 import "errors"
 
@@ -17,4 +17,5 @@ var (
 	ErrInvalidChainID    = errors.New("invalid chain ID")
 	ErrInvalidTxType     = errors.New("invalid transaction type")
 	ErrGasPriceTooLow    = errors.New("gas price below minimum")
+	ErrReplyFailed       = errors.New("reply handler failed")
 )

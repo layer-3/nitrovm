@@ -1,4 +1,4 @@
-package nitrovm
+package crypto
 
 import (
 	"encoding/hex"
@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+
+	"github.com/layer-3/nitrovm/core"
 )
 
 // Hardhat account 0 test vector.
@@ -48,7 +50,7 @@ func TestRLPRoundtrip(t *testing.T) {
 		GasLimit: 1_000_000,
 		GasPrice: 1,
 		Type:     TxExecute,
-		Contract: Address{0x01, 0x02, 0x03},
+		Contract: core.Address{0x01, 0x02, 0x03},
 		Msg:      []byte(`{"transfer":{"to":"0x00","amount":"100"}}`),
 		Funds:    []RLPCoin{{Denom: "YELLOW", Amount: "500"}},
 	}
@@ -88,7 +90,7 @@ func TestSignAndRecover_Execute(t *testing.T) {
 		GasLimit: 500_000,
 		GasPrice: 1,
 		Type:     TxExecute,
-		Contract: Address{0xaa},
+		Contract: core.Address{0xaa},
 		Msg:      []byte(`{"do_something":{}}`),
 	}
 	stx, err := SignTx(tx, priv)
@@ -163,7 +165,7 @@ func TestTamperedSignatureRejected(t *testing.T) {
 		GasLimit: 500_000,
 		GasPrice: 1,
 		Type:     TxExecute,
-		Contract: Address{0xbb},
+		Contract: core.Address{0xbb},
 		Msg:      []byte(`{}`),
 	}
 	stx, err := SignTx(tx, priv)
@@ -188,7 +190,7 @@ func TestSignedTxEncodeDecode(t *testing.T) {
 		GasLimit: 1_000_000,
 		GasPrice: 2,
 		Type:     TxExecute,
-		Contract: Address{0xcc},
+		Contract: core.Address{0xcc},
 		Msg:      []byte(`{"ping":{}}`),
 	}
 	stx, err := SignTx(tx, priv)
@@ -224,7 +226,7 @@ func TestWrongChainIDRecoversDifferentAddress(t *testing.T) {
 		GasLimit: 100_000,
 		GasPrice: 1,
 		Type:     TxExecute,
-		Contract: Address{0xdd},
+		Contract: core.Address{0xdd},
 		Msg:      []byte(`{}`),
 	}
 	stx, err := SignTx(tx, priv)
@@ -242,8 +244,8 @@ func TestWrongChainIDRecoversDifferentAddress(t *testing.T) {
 }
 
 func TestAmountMul(t *testing.T) {
-	a := NewAmount(300)
-	b := NewAmount(5000)
+	a := core.NewAmount(300)
+	b := core.NewAmount(5000)
 	result := a.Mul(b)
 	if result.String() != "1500000" {
 		t.Fatalf("300 * 5000 = %s, want 1500000", result.String())

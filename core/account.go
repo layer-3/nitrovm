@@ -1,4 +1,4 @@
-package nitrovm
+package core
 
 // Account represents an on-chain account (EOA or contract).
 type Account struct {

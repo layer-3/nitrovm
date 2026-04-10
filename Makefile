@@ -19,11 +19,11 @@ build-contract:
 
 # Run Go unit + integration tests.
 test: build-contract
-	CGO_ENABLED=1 go test -v -count=1 github.com/layer-3/nitrovm
+	CGO_ENABLED=1 go test -v -count=1 ./...
 
-# Run end-to-end CLI functional test (server + client).
+# Run end-to-end CLI functional test (server + client, signed transactions).
 test-script: build-contract
-	bash scripts/test_token.sh
+	bash scripts/test_signed.sh
 
 clean:
 	cargo clean --manifest-path $(TOKEN_DIR)/Cargo.toml

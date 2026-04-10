@@ -1,4 +1,4 @@
-package nitrovm
+package crypto
 
 import (
 	"fmt"
@@ -7,6 +7,8 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/ethereum/go-ethereum/rlp"
 	"golang.org/x/crypto/sha3"
+
+	"github.com/layer-3/nitrovm/core"
 )
 
 // TxType discriminates transaction kinds.
@@ -32,7 +34,7 @@ type Transaction struct {
 	CodeID []byte // code hash (TxInstantiate only)
 	Label  string // (TxInstantiate only)
 	// Execute fields
-	Contract Address // (TxExecute only)
+	Contract core.Address // (TxExecute only)
 	// Shared fields
 	Msg   []byte    // JSON message (TxInstantiate, TxExecute)
 	Funds []RLPCoin // attached funds
@@ -61,17 +63,17 @@ func Keccak256(data []byte) []byte {
 
 // PubKeyToAddress derives an Ethereum-style address from an uncompressed
 // secp256k1 public key (65 bytes with 0x04 prefix).
-func PubKeyToAddress(pubkey []byte) Address {
+func PubKeyToAddress(pubkey []byte) core.Address {
 	// Strip the 0x04 prefix if present.
 	if len(pubkey) == 65 && pubkey[0] == 0x04 {
 		pubkey = pubkey[1:]
 	}
 	hash := Keccak256(pubkey)
-	return BytesToAddress(hash[12:])
+	return core.BytesToAddress(hash[12:])
 }
 
 // DeriveAddress computes the address for a secp256k1 private key.
-func DeriveAddress(privkey *secp256k1.PrivateKey) Address {
+func DeriveAddress(privkey *secp256k1.PrivateKey) core.Address {
 	pub := privkey.PubKey().SerializeUncompressed()
 	return PubKeyToAddress(pub)
 }
@@ -122,10 +124,10 @@ func SignTx(tx *Transaction, privkey *secp256k1.PrivateKey) (*SignedTransaction,
 }
 
 // RecoverSender recovers the sender address from a signed transaction.
-func RecoverSender(stx *SignedTransaction) (Address, error) {
+func RecoverSender(stx *SignedTransaction) (core.Address, error) {
 	hash, err := HashTx(&stx.Tx)
 	if err != nil {
-		return Address{}, fmt.Errorf("hash tx: %w", err)
+		return core.Address{}, fmt.Errorf("hash tx: %w", err)
 	}
 
 	// Reconstruct compact signature: [V || R || S]
@@ -136,7 +138,7 @@ func RecoverSender(stx *SignedTransaction) (Address, error) {
 
 	pubkey, _, err := ecdsa.RecoverCompact(sig[:], hash)
 	if err != nil {
-		return Address{}, fmt.Errorf("%w: %v", ErrInvalidSignature, err)
+		return core.Address{}, fmt.Errorf("%w: %v", core.ErrInvalidSignature, err)
 	}
 
 	return PubKeyToAddress(pubkey.SerializeUncompressed()), nil
@@ -160,7 +162,7 @@ func EncodeSignedTx(stx *SignedTransaction) ([]byte, error) {
 // DecodeSignedTx deserializes a SignedTransaction from bytes.
 func DecodeSignedTx(data []byte) (*SignedTransaction, error) {
 	if len(data) < 66 { // minimum: 1 byte RLP + 65 bytes sig
-		return nil, fmt.Errorf("%w: data too short", ErrInvalidSignature)
+		return nil, fmt.Errorf("%w: data too short", core.ErrInvalidSignature)
 	}
 
 	// The signature is the last 65 bytes.

@@ -111,13 +111,39 @@ The sender of a dispatched sub-message is the calling contract's address. Sub-me
 
 **Recursion limit:** dispatch depth is capped at **10** to prevent infinite loops. Exceeding this limit aborts the transaction.
 
+Events emitted by sub-calls are collected and appended to the parent execution result.
+
+### 3.6 Reply Callbacks
+
+Contracts can react to the outcome of their sub-messages using the `ReplyOn` field and the `reply` entry point. Each sub-message carries an `ID` (arbitrary uint64 chosen by the contract) and an optional `Payload` (opaque bytes, max 128 KiB). After a sub-message is dispatched, NitroVM checks `ReplyOn` to decide whether to invoke the calling contract's `reply(env, reply)` entry point.
+
+| ReplyOn        | On Success          | On Error                       |
+|----------------|---------------------|--------------------------------|
+| `ReplyNever`   | skip reply          | abort transaction              |
+| `ReplySuccess` | invoke reply        | abort transaction              |
+| `ReplyError`   | skip reply          | rollback state + invoke reply  |
+| `ReplyAlways`  | invoke reply        | rollback state + invoke reply  |
+
+The `Reply` object passed to the entry point contains:
+
+| Field     | Description                                                   |
+|-----------|---------------------------------------------------------------|
+| `id`      | The `SubMsg.ID` — used to match which sub-message triggered the reply |
+| `payload` | Echo of `SubMsg.Payload`                                      |
+| `result`  | `Ok { events, data }` on success, or `Err "message"` on failure |
+| `gas_used`| Gas consumed by the sub-message                               |
+
+**Error catching:** When `ReplyOn` is `ReplyError` or `ReplyAlways` and the sub-message fails, NitroVM rolls back all state changes from the failed sub-message (both in-memory balances and contract storage via savepoints) before invoking `reply`. This allows the contract to handle the failure gracefully.
+
+**Data propagation:** If the `reply` handler sets `Data` in its response, it **replaces** the parent execution's `Data` field. This enables patterns like extracting a return value from a sub-message.
+
+**Reply chaining:** The `reply` handler itself returns a `Response` that may contain further sub-messages. These are dispatched recursively, subject to the same depth limit of 10.
+
+**Reply errors are not catchable:** If the `reply` entry point itself returns an error, the entire transaction aborts. Only the original sub-message error can be caught via `ReplyError`/`ReplyAlways`.
+
 **Not yet supported:**
 
 - `WasmMsg::Migrate` — migrating contracts
-- `ReplyOn` callbacks — contracts cannot react to the success or failure of their sub-messages
-- `SubMsg::id` / reply routing
-
-Events emitted by sub-calls are collected and appended to the parent execution result.
 
 ## 4. Storage
 
@@ -202,6 +228,7 @@ Contracts must export the following CosmWasm entry points:
 instantiate(env_ptr, info_ptr, msg_ptr) -> result_ptr
 execute(env_ptr, info_ptr, msg_ptr) -> result_ptr
 query(env_ptr, msg_ptr) -> result_ptr
+reply(env_ptr, msg_ptr) -> result_ptr       // optional — required if using ReplyOn
 allocate(size) -> ptr
 deallocate(ptr)
 ```
@@ -411,6 +438,5 @@ When the server runs without `--require-sig`, both signed and unsigned requests 
 
 ## 9. Future Work
 
-- `ReplyOn` callbacks and sub-message reply routing
 - Contract migration and admin controls (`WasmMsg::Migrate`)
 - IBC support for cross-chain messaging

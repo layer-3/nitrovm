@@ -1,4 +1,10 @@
-package nitrovm
+package core
+
+const (
+	DefaultGasLimit    = uint64(10_000_000)
+	DefaultMemoryLimit = uint32(256) // MB
+	DefaultCacheSize   = uint32(100) // MB
+)
 
 // Config holds NitroVM configuration.
 type Config struct {

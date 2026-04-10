@@ -10,7 +10,8 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 
-	"github.com/layer-3/nitrovm"
+	"github.com/layer-3/nitrovm/core"
+	"github.com/layer-3/nitrovm/crypto"
 )
 
 // getDefaultKeyPath returns ~/.nitrovm/key.
@@ -29,8 +30,7 @@ func loadPrivateKey(path string) (*secp256k1.PrivateKey, error) {
 		return nil, fmt.Errorf("read keyfile %s: %w", path, err)
 	}
 	hexStr := strings.TrimSpace(string(data))
-	hexStr = strings.TrimPrefix(hexStr, "0x")
-	hexStr = strings.TrimPrefix(hexStr, "0X")
+	hexStr = core.TrimHexPrefix(hexStr)
 	b, err := hex.DecodeString(hexStr)
 	if err != nil {
 		return nil, fmt.Errorf("bad hex in keyfile: %w", err)
@@ -42,44 +42,50 @@ func loadPrivateKey(path string) (*secp256k1.PrivateKey, error) {
 }
 
 // fetchNonce queries the server for the current nonce of an address.
-func fetchNonce(addr nitrovm.Address) (uint64, error) {
-	resp, err := doGet(serverURL + "/account/" + addr.Hex())
+func fetchNonce(addr core.Address) (uint64, error) {
+	resp, err := httpClient.Get(serverURL + "/account/" + addr.Hex())
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	raw, err := readResponse(resp)
+	if err != nil {
+		return 0, err
+	}
 	var result struct {
 		Nonce uint64 `json:"nonce"`
-		Error string `json:"error"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
-	if result.Error != "" {
-		return 0, fmt.Errorf("%s", result.Error)
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return 0, fmt.Errorf("parse nonce response: %w", err)
 	}
 	return result.Nonce, nil
 }
 
 // fetchChainID queries the server for the chain ID.
 func fetchChainID() (string, error) {
-	resp, err := doGet(serverURL + "/status")
+	resp, err := httpClient.Get(serverURL + "/status")
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	raw, err := readResponse(resp)
+	if err != nil {
+		return "", err
+	}
 	var result struct {
 		ChainID string `json:"chain_id"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return "", fmt.Errorf("parse status response: %w", err)
+	}
 	return result.ChainID, nil
 }
 
 // signAndMarshal signs a transaction and returns the JSON body for the server.
-func signAndMarshal(tx *nitrovm.Transaction, key *secp256k1.PrivateKey) ([]byte, error) {
-	stx, err := nitrovm.SignTx(tx, key)
+func signAndMarshal(tx *crypto.Transaction, key *secp256k1.PrivateKey) ([]byte, error) {
+	stx, err := crypto.SignTx(tx, key)
 	if err != nil {
 		return nil, fmt.Errorf("sign tx: %w", err)
 	}
-	encoded, err := nitrovm.EncodeSignedTx(stx)
+	encoded, err := crypto.EncodeSignedTx(stx)
 	if err != nil {
 		return nil, fmt.Errorf("encode signed tx: %w", err)
 	}

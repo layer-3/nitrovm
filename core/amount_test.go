@@ -1,4 +1,4 @@
-package nitrovm
+package core
 
 import (
 	"encoding/json"

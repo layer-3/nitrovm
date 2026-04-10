@@ -1,4 +1,4 @@
-package nitrovm
+package core
 
 import (
 	"encoding/json"
@@ -13,12 +13,16 @@ type Amount struct {
 	v *big.Int
 }
 
+// bigZero is an immutable zero shared across all nil-Amount calls.
+// Safe because val() results are only used as rhs arguments to new(big.Int).Op().
+var bigZero = new(big.Int)
+
 // val returns the underlying big.Int, treating nil as zero.
 func (a Amount) val() *big.Int {
 	if a.v != nil {
 		return a.v
 	}
-	return new(big.Int)
+	return bigZero
 }
 
 // NewAmount creates an Amount from a uint64.
@@ -26,15 +30,24 @@ func NewAmount(n uint64) Amount {
 	return Amount{v: new(big.Int).SetUint64(n)}
 }
 
+// parseNonNegativeBigInt parses a base-10 string into a non-negative *big.Int.
+func parseNonNegativeBigInt(s string) (*big.Int, error) {
+	v, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid amount: %q", s)
+	}
+	if v.Sign() < 0 {
+		return nil, fmt.Errorf("negative amount: %q", s)
+	}
+	return v, nil
+}
+
 // NewAmountFromString parses a base-10 string into an Amount.
 // Returns an error if the string is not a valid non-negative integer.
 func NewAmountFromString(s string) (Amount, error) {
-	v, ok := new(big.Int).SetString(s, 10)
-	if !ok {
-		return Amount{}, fmt.Errorf("invalid amount: %q", s)
-	}
-	if v.Sign() < 0 {
-		return Amount{}, fmt.Errorf("negative amount: %q", s)
+	v, err := parseNonNegativeBigInt(s)
+	if err != nil {
+		return Amount{}, err
 	}
 	return Amount{v: v}, nil
 }
@@ -78,18 +91,20 @@ func (a Amount) Cmp(b Amount) int {
 }
 
 // Equal returns true if a == b.
-func (a Amount) Equal(b Amount) bool {
-	return a.val().Cmp(b.val()) == 0
-}
+func (a Amount) Equal(b Amount) bool { return a.Cmp(b) == 0 }
 
 // GT returns true if a > b.
-func (a Amount) GT(b Amount) bool {
-	return a.val().Cmp(b.val()) > 0
-}
+func (a Amount) GT(b Amount) bool { return a.Cmp(b) > 0 }
 
 // LT returns true if a < b.
-func (a Amount) LT(b Amount) bool {
-	return a.val().Cmp(b.val()) < 0
+func (a Amount) LT(b Amount) bool { return a.Cmp(b) < 0 }
+
+// DeepCopy returns an independent copy of the amount, cloning the underlying big.Int.
+func (a Amount) DeepCopy() Amount {
+	if a.v == nil {
+		return Amount{}
+	}
+	return Amount{v: new(big.Int).Set(a.v)}
 }
 
 // IsZero returns true if the amount is zero.
@@ -112,12 +127,9 @@ func (a *Amount) UnmarshalJSON(data []byte) error {
 	// Try quoted string first.
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil {
-		v, ok := new(big.Int).SetString(s, 10)
-		if !ok {
-			return fmt.Errorf("invalid amount string: %q", s)
-		}
-		if v.Sign() < 0 {
-			return fmt.Errorf("negative amount: %q", s)
+		v, err := parseNonNegativeBigInt(s)
+		if err != nil {
+			return err
 		}
 		a.v = v
 		return nil
@@ -128,12 +140,9 @@ func (a *Amount) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &n); err != nil {
 		return fmt.Errorf("amount must be a string or number, got %s", string(data))
 	}
-	v, ok := new(big.Int).SetString(n.String(), 10)
-	if !ok {
-		return fmt.Errorf("invalid amount number: %s", n)
-	}
-	if v.Sign() < 0 {
-		return fmt.Errorf("negative amount: %s", n)
+	v, err := parseNonNegativeBigInt(n.String())
+	if err != nil {
+		return err
 	}
 	a.v = v
 	return nil

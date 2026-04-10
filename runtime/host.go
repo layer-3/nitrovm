@@ -1,4 +1,4 @@
-package nitrovm
+package runtime
 
 // host.go contains the CosmWasm host function implementations used by the VM:
 //   - contractKVStore: adapts StorageAdapter to wasmvm's KVStore interface
@@ -9,9 +9,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"log"
 
 	wasmvmtypes "github.com/CosmWasm/wasmvm/v2/types"
+
+	"github.com/layer-3/nitrovm/core"
+	"github.com/layer-3/nitrovm/storage"
 )
 
 // ---------------------------------------------------------------------------
@@ -21,29 +24,36 @@ import (
 // contractKVStore wraps a StorageAdapter for a specific contract address,
 // implementing wasmvmtypes.KVStore.
 type contractKVStore struct {
-	addr    Address
-	adapter StorageAdapter
+	addr    core.Address
+	adapter storage.StorageAdapter
 }
 
-func newContractKVStore(addr Address, adapter StorageAdapter) wasmvmtypes.KVStore {
+func newContractKVStore(addr core.Address, adapter storage.StorageAdapter) wasmvmtypes.KVStore {
 	return &contractKVStore{addr: addr, adapter: adapter}
 }
 
 func (s *contractKVStore) Get(key []byte) []byte {
-	val, _ := s.adapter.Get(s.addr, key)
+	val, err := s.adapter.Get(s.addr, key)
+	if err != nil {
+		log.Printf("storage get error (contract=%s): %v", s.addr.Hex(), err)
+	}
 	return val
 }
 
 func (s *contractKVStore) Set(key, value []byte) {
-	_ = s.adapter.Set(s.addr, key, value)
+	if err := s.adapter.Set(s.addr, key, value); err != nil {
+		log.Printf("storage set error (contract=%s): %v", s.addr.Hex(), err)
+	}
 }
 
 func (s *contractKVStore) Delete(key []byte) {
-	_ = s.adapter.Delete(s.addr, key)
+	if err := s.adapter.Delete(s.addr, key); err != nil {
+		log.Printf("storage delete error (contract=%s): %v", s.addr.Hex(), err)
+	}
 }
 
 func (s *contractKVStore) Iterator(start, end []byte) wasmvmtypes.Iterator {
-	iter, err := s.adapter.Range(s.addr, start, end, Ascending)
+	iter, err := s.adapter.Range(s.addr, start, end, storage.Ascending)
 	if err != nil {
 		return &emptyIterator{}
 	}
@@ -51,7 +61,7 @@ func (s *contractKVStore) Iterator(start, end []byte) wasmvmtypes.Iterator {
 }
 
 func (s *contractKVStore) ReverseIterator(start, end []byte) wasmvmtypes.Iterator {
-	iter, err := s.adapter.Range(s.addr, start, end, Descending)
+	iter, err := s.adapter.Range(s.addr, start, end, storage.Descending)
 	if err != nil {
 		return &emptyIterator{}
 	}
@@ -59,7 +69,7 @@ func (s *contractKVStore) ReverseIterator(start, end []byte) wasmvmtypes.Iterato
 }
 
 type wasmIterator struct {
-	inner StorageIterator
+	inner storage.StorageIterator
 	start []byte
 	end   []byte
 }
@@ -102,7 +112,7 @@ func humanizeAddress(canonical []byte) (string, uint64, error) {
 }
 
 func canonicalizeAddress(human string) ([]byte, uint64, error) {
-	s := strings.TrimPrefix(strings.TrimPrefix(human, "0x"), "0X")
+	s := core.TrimHexPrefix(human)
 	if len(s) != 40 {
 		return nil, 0, fmt.Errorf("invalid address length: %d hex chars, want 40", len(s))
 	}
@@ -114,14 +124,8 @@ func canonicalizeAddress(human string) ([]byte, uint64, error) {
 }
 
 func validateAddress(human string) (uint64, error) {
-	s := strings.TrimPrefix(strings.TrimPrefix(human, "0x"), "0X")
-	if len(s) != 40 {
-		return 0, fmt.Errorf("invalid address length: %d hex chars, want 40", len(s))
-	}
-	if _, err := hex.DecodeString(s); err != nil {
-		return 0, fmt.Errorf("invalid hex: %w", err)
-	}
-	return 0, nil
+	_, gas, err := canonicalizeAddress(human)
+	return gas, err
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +133,8 @@ func validateAddress(human string) (uint64, error) {
 // ---------------------------------------------------------------------------
 
 type chainQuerier struct {
-	vm *NitroVM
+	vm          *NitroVM
+	gasConsumed uint64
 }
 
 func newChainQuerier(vm *NitroVM) wasmvmtypes.Querier {
@@ -138,6 +143,7 @@ func newChainQuerier(vm *NitroVM) wasmvmtypes.Querier {
 
 func (q *chainQuerier) Query(request wasmvmtypes.QueryRequest, gasLimit uint64) ([]byte, error) {
 	if request.Bank != nil {
+		q.gasConsumed += GasCostStorageRead
 		return q.bankQuery(request.Bank)
 	}
 	if request.Wasm != nil {
@@ -146,11 +152,11 @@ func (q *chainQuerier) Query(request wasmvmtypes.QueryRequest, gasLimit uint64) 
 	return nil, fmt.Errorf("unsupported query type")
 }
 
-func (q *chainQuerier) GasConsumed() uint64 { return 0 }
+func (q *chainQuerier) GasConsumed() uint64 { return q.gasConsumed }
 
 func (q *chainQuerier) bankQuery(query *wasmvmtypes.BankQuery) ([]byte, error) {
 	if query.Balance != nil {
-		addr, err := HexToAddress(query.Balance.Address)
+		addr, err := core.HexToAddress(query.Balance.Address)
 		if err != nil {
 			return nil, err
 		}
@@ -163,7 +169,7 @@ func (q *chainQuerier) bankQuery(query *wasmvmtypes.BankQuery) ([]byte, error) {
 		})
 	}
 	if query.AllBalances != nil {
-		addr, err := HexToAddress(query.AllBalances.Address)
+		addr, err := core.HexToAddress(query.AllBalances.Address)
 		if err != nil {
 			return nil, err
 		}
@@ -179,11 +185,12 @@ func (q *chainQuerier) bankQuery(query *wasmvmtypes.BankQuery) ([]byte, error) {
 
 func (q *chainQuerier) wasmQuery(query *wasmvmtypes.WasmQuery, gasLimit uint64) ([]byte, error) {
 	if query.Smart != nil {
-		addr, err := HexToAddress(query.Smart.ContractAddr)
+		addr, err := core.HexToAddress(query.Smart.ContractAddr)
 		if err != nil {
 			return nil, err
 		}
-		result, _, err := q.vm.Query(addr, query.Smart.Msg, gasLimit)
+		result, gasUsed, err := q.vm.Query(addr, query.Smart.Msg, gasLimit)
+		q.gasConsumed += gasUsed
 		if err != nil {
 			return nil, err
 		}

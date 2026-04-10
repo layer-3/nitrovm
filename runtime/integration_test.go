@@ -1,4 +1,4 @@
-package nitrovm_test
+package runtime_test
 
 import (
 	"encoding/hex"
@@ -12,26 +12,28 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	wasmvmtypes "github.com/CosmWasm/wasmvm/v2/types"
 
-	"github.com/layer-3/nitrovm"
+	"github.com/layer-3/nitrovm/core"
+	"github.com/layer-3/nitrovm/crypto"
+	"github.com/layer-3/nitrovm/runtime"
 	"github.com/layer-3/nitrovm/storage/sqlite"
 )
 
-const tokenWASMPath = "contracts/token/target/wasm32-unknown-unknown/release/token.wasm"
+const tokenWASMPath = "../contracts/token/target/wasm32-unknown-unknown/release/token.wasm"
 
 // testingGasLimit matches wasmvm's own test gas limit.
 const testingGasLimit = uint64(500_000_000_000)
 
 // testVM creates a NitroVM backed by a temp-dir SQLite store.
-func testVM(t *testing.T) *nitrovm.NitroVM {
+func testVM(t *testing.T) *runtime.NitroVM {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := sqlite.New(filepath.Join(dir, "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := nitrovm.DefaultConfig()
+	cfg := core.DefaultConfig()
 	cfg.DataDir = dir
-	vm, err := nitrovm.New(cfg, store)
+	vm, err := runtime.New(cfg, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +53,7 @@ func loadTokenWASM(t *testing.T) []byte {
 
 // instantiateToken stores code and creates a token instance.
 // Returns (codeID, contractAddr).
-func instantiateToken(t *testing.T, vm *nitrovm.NitroVM, creator nitrovm.Address, initMsg []byte) ([]byte, nitrovm.Address) {
+func instantiateToken(t *testing.T, vm *runtime.NitroVM, creator core.Address, initMsg []byte) ([]byte, core.Address) {
 	t.Helper()
 	code := loadTokenWASM(t)
 	codeID, _, err := vm.StoreCode(code, nil, nil)
@@ -66,7 +68,7 @@ func instantiateToken(t *testing.T, vm *nitrovm.NitroVM, creator nitrovm.Address
 }
 
 // queryBalance returns the token balance for addr on the given contract.
-func queryBalance(t *testing.T, vm *nitrovm.NitroVM, contract nitrovm.Address, addr string) string {
+func queryBalance(t *testing.T, vm *runtime.NitroVM, contract core.Address, addr string) string {
 	t.Helper()
 	msg, _ := json.Marshal(map[string]any{"balance": map[string]any{"address": addr}})
 	result, _, err := vm.Query(contract, msg, testingGasLimit)
@@ -86,8 +88,8 @@ func queryBalance(t *testing.T, vm *nitrovm.NitroVM, contract nitrovm.Address, a
 
 func TestTokenInstantiateAndQueryBalance(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -108,7 +110,7 @@ func TestTokenInstantiateAndQueryBalance(t *testing.T) {
 
 func TestTokenQueryTokenInfo(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -148,8 +150,8 @@ func TestTokenQueryTokenInfo(t *testing.T) {
 
 func TestTokenTransfer(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -182,8 +184,8 @@ func TestTokenTransfer(t *testing.T) {
 
 func TestTokenTransferInsufficientFunds(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -215,8 +217,8 @@ func TestTokenTransferInsufficientFunds(t *testing.T) {
 
 func TestTokenTransferZeroAmount(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -243,8 +245,8 @@ func TestTokenTransferZeroAmount(t *testing.T) {
 
 func TestTokenQueryUnknownAddress(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	unknown, _ := nitrovm.HexToAddress("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	unknown, _ := core.HexToAddress("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -261,9 +263,9 @@ func TestTokenQueryUnknownAddress(t *testing.T) {
 
 func TestTokenMultipleTransfers(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
-	charlie, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000003")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
+	charlie, _ := core.HexToAddress("0x0000000000000000000000000000000000000003")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -313,8 +315,8 @@ func TestTokenMultipleTransfers(t *testing.T) {
 
 func TestExecuteOutOfGas(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -336,7 +338,7 @@ func TestExecuteOutOfGas(t *testing.T) {
 
 func TestQueryWithGasLimit(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -363,10 +365,10 @@ func TestQueryWithGasLimit(t *testing.T) {
 
 func TestInstantiateWithFunds(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
 
 	// Give Alice native YELLOW balance.
-	vm.SetBalance(alice, nitrovm.NewAmount(10000))
+	vm.SetBalance(alice, core.NewAmount(10000))
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -388,21 +390,21 @@ func TestInstantiateWithFunds(t *testing.T) {
 	}
 
 	// Alice should have 10000 - 500 = 9500.
-	if bal := vm.GetBalance(alice); !bal.Equal(nitrovm.NewAmount(9500)) {
+	if bal := vm.GetBalance(alice); !bal.Equal(core.NewAmount(9500)) {
 		t.Errorf("alice native balance = %s, want 9500", bal)
 	}
 	// Contract should have 500.
-	if bal := vm.GetBalance(res.ContractAddress); !bal.Equal(nitrovm.NewAmount(500)) {
+	if bal := vm.GetBalance(res.ContractAddress); !bal.Equal(core.NewAmount(500)) {
 		t.Errorf("contract native balance = %s, want 500", bal)
 	}
 }
 
 func TestExecuteWithFunds(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
 
-	vm.SetBalance(alice, nitrovm.NewAmount(5000))
+	vm.SetBalance(alice, core.NewAmount(5000))
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -422,21 +424,21 @@ func TestExecuteWithFunds(t *testing.T) {
 	}
 
 	// Alice native: 5000 - 200 = 4800.
-	if bal := vm.GetBalance(alice); !bal.Equal(nitrovm.NewAmount(4800)) {
+	if bal := vm.GetBalance(alice); !bal.Equal(core.NewAmount(4800)) {
 		t.Errorf("alice native balance = %s, want 4800", bal)
 	}
 	// Contract native: 0 + 200 = 200.
-	if bal := vm.GetBalance(contract); !bal.Equal(nitrovm.NewAmount(200)) {
+	if bal := vm.GetBalance(contract); !bal.Equal(core.NewAmount(200)) {
 		t.Errorf("contract native balance = %s, want 200", bal)
 	}
 }
 
 func TestExecuteWithFundsInsufficientBalance(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
 
-	vm.SetBalance(alice, nitrovm.NewAmount(10)) // only 10
+	vm.SetBalance(alice, core.NewAmount(10)) // only 10
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -454,7 +456,7 @@ func TestExecuteWithFundsInsufficientBalance(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected insufficient funds error")
 	}
-	if !errors.Is(err, nitrovm.ErrInsufficientFunds) {
+	if !errors.Is(err, core.ErrInsufficientFunds) {
 		t.Errorf("error = %v, want ErrInsufficientFunds", err)
 	}
 }
@@ -463,8 +465,8 @@ func TestExecuteWithFundsInsufficientBalance(t *testing.T) {
 
 func TestExecuteReturnsEvents(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -508,7 +510,7 @@ func TestExecuteReturnsEvents(t *testing.T) {
 
 func TestInstantiateReturnsEvents(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -544,8 +546,8 @@ func TestInstantiateReturnsEvents(t *testing.T) {
 
 func TestExecuteResultGasUsed(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
 
 	initMsg, _ := json.Marshal(map[string]any{
 		"name": "Yellow Token", "symbol": "YLW", "decimals": 18,
@@ -571,7 +573,7 @@ func TestExecuteResultGasUsed(t *testing.T) {
 
 func TestCrossContractQuery(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
 
 	// Deploy two separate token contracts.
 	initMsg1, _ := json.Marshal(map[string]any{
@@ -610,10 +612,10 @@ func testKey(t *testing.T) *secp256k1.PrivateKey {
 func TestSignedStoreInstantiateExecute(t *testing.T) {
 	vm := testVM(t)
 	key := testKey(t)
-	sender := nitrovm.DeriveAddress(key)
+	sender := crypto.DeriveAddress(key)
 
 	// Fund the sender for gas fees.
-	vm.SetBalance(sender, nitrovm.NewAmount(1_000_000_000))
+	vm.SetBalance(sender, core.NewAmount(1_000_000_000))
 
 	// Signed store.
 	code := loadTokenWASM(t)
@@ -648,7 +650,7 @@ func TestSignedStoreInstantiateExecute(t *testing.T) {
 	}
 
 	// Signed execute.
-	bob, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000099")
+	bob, _ := core.HexToAddress("0x0000000000000000000000000000000000000099")
 	execMsg, _ := json.Marshal(map[string]any{
 		"transfer": map[string]any{"recipient": bob.Hex(), "amount": "200"},
 	})
@@ -671,7 +673,7 @@ func TestSignedStoreInstantiateExecute(t *testing.T) {
 func TestSignedNonceRejection(t *testing.T) {
 	vm := testVM(t)
 	key := testKey(t)
-	sender := nitrovm.DeriveAddress(key)
+	sender := crypto.DeriveAddress(key)
 
 	code := loadTokenWASM(t)
 	// Store with nonce 0 succeeds.
@@ -684,7 +686,7 @@ func TestSignedNonceRejection(t *testing.T) {
 	// Try store with nonce 0 again (replay) — should fail.
 	nonce = 0
 	_, _, err = vm.StoreCode(code, &sender, &nonce)
-	if !errors.Is(err, nitrovm.ErrInvalidNonce) {
+	if !errors.Is(err, core.ErrInvalidNonce) {
 		t.Fatalf("replay store: got %v, want ErrInvalidNonce", err)
 	}
 }
@@ -692,16 +694,16 @@ func TestSignedNonceRejection(t *testing.T) {
 func TestDeductGasFee(t *testing.T) {
 	vm := testVM(t)
 	key := testKey(t)
-	sender := nitrovm.DeriveAddress(key)
+	sender := crypto.DeriveAddress(key)
 
-	vm.SetBalance(sender, nitrovm.NewAmount(1_000_000))
+	vm.SetBalance(sender, core.NewAmount(1_000_000))
 
 	// Deduct fee: 100 gas * 5 gas_price = 500
 	err := vm.DeductGasFee(sender, 100, 5)
 	if err != nil {
 		t.Fatalf("deduct gas fee: %v", err)
 	}
-	if bal := vm.GetBalance(sender); !bal.Equal(nitrovm.NewAmount(999_500)) {
+	if bal := vm.GetBalance(sender); !bal.Equal(core.NewAmount(999_500)) {
 		t.Errorf("balance after fee = %s, want 999500", bal)
 	}
 
@@ -710,7 +712,7 @@ func TestDeductGasFee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("zero gas price: %v", err)
 	}
-	if bal := vm.GetBalance(sender); !bal.Equal(nitrovm.NewAmount(999_500)) {
+	if bal := vm.GetBalance(sender); !bal.Equal(core.NewAmount(999_500)) {
 		t.Errorf("balance after zero-price fee = %s, want 999500", bal)
 	}
 }
@@ -718,50 +720,50 @@ func TestDeductGasFee(t *testing.T) {
 func TestDeductGasFeeInsufficientFunds(t *testing.T) {
 	vm := testVM(t)
 	key := testKey(t)
-	sender := nitrovm.DeriveAddress(key)
+	sender := crypto.DeriveAddress(key)
 
-	vm.SetBalance(sender, nitrovm.NewAmount(100))
+	vm.SetBalance(sender, core.NewAmount(100))
 
 	// Deduct fee: 1000 gas * 1 gas_price = 1000 > 100 balance
 	err := vm.DeductGasFee(sender, 1000, 1)
-	if !errors.Is(err, nitrovm.ErrInsufficientFunds) {
+	if !errors.Is(err, core.ErrInsufficientFunds) {
 		t.Fatalf("got %v, want ErrInsufficientFunds", err)
 	}
 	// Balance unchanged.
-	if bal := vm.GetBalance(sender); !bal.Equal(nitrovm.NewAmount(100)) {
+	if bal := vm.GetBalance(sender); !bal.Equal(core.NewAmount(100)) {
 		t.Errorf("balance should be unchanged, got %s", bal)
 	}
 }
 
 func TestSignAndRecoverRoundtrip(t *testing.T) {
 	key := testKey(t)
-	sender := nitrovm.DeriveAddress(key)
+	sender := crypto.DeriveAddress(key)
 
-	tx := &nitrovm.Transaction{
+	tx := &crypto.Transaction{
 		ChainID:  "nitro-test",
 		Nonce:    42,
 		GasLimit: 1_000_000,
 		GasPrice: 1,
-		Type:     nitrovm.TxExecute,
-		Contract: nitrovm.Address{0xaa, 0xbb},
+		Type:     crypto.TxExecute,
+		Contract: core.Address{0xaa, 0xbb},
 		Msg:      []byte(`{"test":true}`),
 	}
 
-	stx, err := nitrovm.SignTx(tx, key)
+	stx, err := crypto.SignTx(tx, key)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Encode -> decode -> recover.
-	encoded, err := nitrovm.EncodeSignedTx(stx)
+	encoded, err := crypto.EncodeSignedTx(stx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := nitrovm.DecodeSignedTx(encoded)
+	decoded, err := crypto.DecodeSignedTx(encoded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	recovered, err := nitrovm.RecoverSender(decoded)
+	recovered, err := crypto.RecoverSender(decoded)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -772,7 +774,7 @@ func TestSignAndRecoverRoundtrip(t *testing.T) {
 
 func TestInstantiateIncrementsNonce(t *testing.T) {
 	vm := testVM(t)
-	alice, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	alice, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
 
 	if got := vm.GetNonce(alice); got != 0 {
 		t.Fatalf("initial nonce = %d, want 0", got)

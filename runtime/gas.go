@@ -1,17 +1,15 @@
-package nitrovm
+package runtime
+
+import "github.com/layer-3/nitrovm/core"
 
 // Gas cost constants per the NitroVM spec.
 const (
-	GasCostInstruction  = 1
-	GasCostStorageRead  = 200
-	GasCostStorageWrite = 5000
-	GasCostHashPerByte  = 3
+	GasCostInstruction      = 1
+	GasCostStorageRead      = 200
+	GasCostStorageWrite     = 5000
+	GasCostHashPerByte      = 3
 	GasCostSigVerify        = 3000
 	GasCostStoreCodePerByte = 420_000
-
-	DefaultGasLimit    = uint64(10_000_000)
-	DefaultMemoryLimit = uint32(256) // MB
-	DefaultCacheSize   = uint32(100) // MB
 )
 
 // GasMeter tracks gas consumption during contract execution.
@@ -41,9 +39,13 @@ func (g *GasMeter) GasRemaining() uint64 {
 
 // ConsumeGas adds the given amount to consumed gas, returning ErrOutOfGas if exceeded.
 func (g *GasMeter) ConsumeGas(amount uint64) error {
-	g.consumed += amount
+	next := g.consumed + amount
+	if next < g.consumed { // uint64 overflow
+		return core.ErrOutOfGas
+	}
+	g.consumed = next
 	if g.consumed > g.limit {
-		return ErrOutOfGas
+		return core.ErrOutOfGas
 	}
 	return nil
 }

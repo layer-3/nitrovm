@@ -1,4 +1,4 @@
-// Package memory implements nitrovm.StorageAdapter backed by in-memory maps.
+// Package memory implements storage.StorageAdapter backed by in-memory maps.
 package memory
 
 import (
@@ -6,25 +6,26 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/layer-3/nitrovm"
+	"github.com/layer-3/nitrovm/core"
+	"github.com/layer-3/nitrovm/storage"
 )
 
-// Store implements nitrovm.StorageAdapter using nested maps.
+// Store implements storage.StorageAdapter using nested maps.
 type Store struct {
 	mu        sync.RWMutex
-	data      map[nitrovm.Address]map[string][]byte
-	snapshots map[string]map[nitrovm.Address]map[string][]byte
+	data      map[core.Address]map[string][]byte
+	snapshots map[string]map[core.Address]map[string][]byte
 }
 
 // New creates a new in-memory storage adapter.
 func New() *Store {
 	return &Store{
-		data:      make(map[nitrovm.Address]map[string][]byte),
-		snapshots: make(map[string]map[nitrovm.Address]map[string][]byte),
+		data:      make(map[core.Address]map[string][]byte),
+		snapshots: make(map[string]map[core.Address]map[string][]byte),
 	}
 }
 
-func (s *Store) Get(contractAddr nitrovm.Address, key []byte) ([]byte, error) {
+func (s *Store) Get(contractAddr core.Address, key []byte) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if m, ok := s.data[contractAddr]; ok {
@@ -35,7 +36,7 @@ func (s *Store) Get(contractAddr nitrovm.Address, key []byte) ([]byte, error) {
 	return nil, nil
 }
 
-func (s *Store) Set(contractAddr nitrovm.Address, key, value []byte) error {
+func (s *Store) Set(contractAddr core.Address, key, value []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.data[contractAddr]
@@ -47,7 +48,7 @@ func (s *Store) Set(contractAddr nitrovm.Address, key, value []byte) error {
 	return nil
 }
 
-func (s *Store) Delete(contractAddr nitrovm.Address, key []byte) error {
+func (s *Store) Delete(contractAddr core.Address, key []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if m, ok := s.data[contractAddr]; ok {
@@ -56,7 +57,7 @@ func (s *Store) Delete(contractAddr nitrovm.Address, key []byte) error {
 	return nil
 }
 
-func (s *Store) Range(contractAddr nitrovm.Address, start, end []byte, order nitrovm.Order) (nitrovm.StorageIterator, error) {
+func (s *Store) Range(contractAddr core.Address, start, end []byte, order storage.Order) (storage.StorageIterator, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -73,7 +74,7 @@ func (s *Store) Range(contractAddr nitrovm.Address, start, end []byte, order nit
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if order == nitrovm.Descending {
+	if order == storage.Descending {
 		for i, j := 0, len(keys)-1; i < j; i, j = i+1, j-1 {
 			keys[i], keys[j] = keys[j], keys[i]
 		}
@@ -118,8 +119,8 @@ func (s *Store) ReleaseSavepoint(name string) error {
 	return nil
 }
 
-func (s *Store) deepCopy() map[nitrovm.Address]map[string][]byte {
-	cp := make(map[nitrovm.Address]map[string][]byte, len(s.data))
+func (s *Store) deepCopy() map[core.Address]map[string][]byte {
+	cp := make(map[core.Address]map[string][]byte, len(s.data))
 	for addr, m := range s.data {
 		cm := make(map[string][]byte, len(m))
 		for k, v := range m {

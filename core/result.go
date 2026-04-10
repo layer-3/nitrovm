@@ -1,4 +1,4 @@
-package nitrovm
+package core
 
 import wasmvmtypes "github.com/CosmWasm/wasmvm/v2/types"
 

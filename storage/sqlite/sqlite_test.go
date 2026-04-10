@@ -4,7 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/layer-3/nitrovm"
+	"github.com/layer-3/nitrovm/core"
+	"github.com/layer-3/nitrovm/storage"
 )
 
 func TestStoreCRUD(t *testing.T) {
@@ -14,7 +15,7 @@ func TestStoreCRUD(t *testing.T) {
 	}
 	defer store.Close()
 
-	addr, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	addr, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
 	key := []byte("hello")
 	val := []byte("world")
 
@@ -58,8 +59,8 @@ func TestStoreIsolation(t *testing.T) {
 	}
 	defer store.Close()
 
-	addr1, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
-	addr2, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000002")
+	addr1, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
+	addr2, _ := core.HexToAddress("0x0000000000000000000000000000000000000002")
 	key := []byte("key")
 
 	store.Set(addr1, key, []byte("val1"))
@@ -83,13 +84,13 @@ func TestStoreRange(t *testing.T) {
 	}
 	defer store.Close()
 
-	addr, _ := nitrovm.HexToAddress("0x0000000000000000000000000000000000000001")
+	addr, _ := core.HexToAddress("0x0000000000000000000000000000000000000001")
 	store.Set(addr, []byte("a"), []byte("1"))
 	store.Set(addr, []byte("b"), []byte("2"))
 	store.Set(addr, []byte("c"), []byte("3"))
 
 	// Full ascending.
-	iter, _ := store.Range(addr, nil, nil, nitrovm.Ascending)
+	iter, _ := store.Range(addr, nil, nil, storage.Ascending)
 	var keys []string
 	for iter.Valid() {
 		keys = append(keys, string(iter.Key()))
@@ -101,7 +102,7 @@ func TestStoreRange(t *testing.T) {
 	}
 
 	// Full descending.
-	iter, _ = store.Range(addr, nil, nil, nitrovm.Descending)
+	iter, _ = store.Range(addr, nil, nil, storage.Descending)
 	keys = nil
 	for iter.Valid() {
 		keys = append(keys, string(iter.Key()))
@@ -113,7 +114,7 @@ func TestStoreRange(t *testing.T) {
 	}
 
 	// Bounded [b, c).
-	iter, _ = store.Range(addr, []byte("b"), []byte("c"), nitrovm.Ascending)
+	iter, _ = store.Range(addr, []byte("b"), []byte("c"), storage.Ascending)
 	keys = nil
 	for iter.Valid() {
 		keys = append(keys, string(iter.Key()))

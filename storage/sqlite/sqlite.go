@@ -1,17 +1,22 @@
-// Package sqlite implements nitrovm.StorageAdapter backed by SQLite.
+// Package sqlite implements storage.StorageAdapter backed by SQLite.
 package sqlite
 
 import (
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"github.com/layer-3/nitrovm"
+	"github.com/layer-3/nitrovm/core"
+	"github.com/layer-3/nitrovm/storage"
 )
 
-// Store implements nitrovm.StorageAdapter backed by SQLite.
+// validSavepointName matches only safe alphanumeric/underscore savepoint names.
+var validSavepointName = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+
+// Store implements storage.StorageAdapter backed by SQLite.
 type Store struct {
 	db *sql.DB
 	mu sync.RWMutex
@@ -38,7 +43,7 @@ func New(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-func (s *Store) Get(contractAddr nitrovm.Address, key []byte) ([]byte, error) {
+func (s *Store) Get(contractAddr core.Address, key []byte) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -53,7 +58,7 @@ func (s *Store) Get(contractAddr nitrovm.Address, key []byte) ([]byte, error) {
 	return value, err
 }
 
-func (s *Store) Set(contractAddr nitrovm.Address, key, value []byte) error {
+func (s *Store) Set(contractAddr core.Address, key, value []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -64,7 +69,7 @@ func (s *Store) Set(contractAddr nitrovm.Address, key, value []byte) error {
 	return err
 }
 
-func (s *Store) Delete(contractAddr nitrovm.Address, key []byte) error {
+func (s *Store) Delete(contractAddr core.Address, key []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -75,12 +80,12 @@ func (s *Store) Delete(contractAddr nitrovm.Address, key []byte) error {
 	return err
 }
 
-func (s *Store) Range(contractAddr nitrovm.Address, start, end []byte, order nitrovm.Order) (nitrovm.StorageIterator, error) {
+func (s *Store) Range(contractAddr core.Address, start, end []byte, order storage.Order) (storage.StorageIterator, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	dir := "ASC"
-	if order == nitrovm.Descending {
+	if order == storage.Descending {
 		dir = "DESC"
 	}
 
@@ -122,6 +127,9 @@ func (s *Store) Close() error {
 
 // Savepoint creates a named SQLite savepoint for transactional rollback.
 func (s *Store) Savepoint(name string) error {
+	if !validSavepointName.MatchString(name) {
+		return fmt.Errorf("invalid savepoint name: %q", name)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec("SAVEPOINT " + name)
@@ -130,6 +138,9 @@ func (s *Store) Savepoint(name string) error {
 
 // RollbackTo rolls back to a previously created savepoint.
 func (s *Store) RollbackTo(name string) error {
+	if !validSavepointName.MatchString(name) {
+		return fmt.Errorf("invalid savepoint name: %q", name)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec("ROLLBACK TO " + name)
@@ -138,6 +149,9 @@ func (s *Store) RollbackTo(name string) error {
 
 // ReleaseSavepoint releases a savepoint without rolling back.
 func (s *Store) ReleaseSavepoint(name string) error {
+	if !validSavepointName.MatchString(name) {
+		return fmt.Errorf("invalid savepoint name: %q", name)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec("RELEASE SAVEPOINT " + name)
