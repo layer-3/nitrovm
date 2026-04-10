@@ -18,4 +18,7 @@ var (
 	ErrInvalidTxType     = errors.New("invalid transaction type")
 	ErrGasPriceTooLow    = errors.New("gas price below minimum")
 	ErrReplyFailed       = errors.New("reply handler failed")
+	ErrUnsupportedDenom  = errors.New("unsupported denomination")
+	ErrCodeTooLarge      = errors.New("code size exceeds maximum")
+	ErrStorageError      = errors.New("storage error")
 )

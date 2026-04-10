@@ -39,6 +39,7 @@ func CreateMetaTables(db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_events_contract ON events(contract);
 		CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+		CREATE INDEX IF NOT EXISTS idx_events_sender ON events(sender);
 	`)
 	if err != nil {
 		return err
@@ -138,32 +139,39 @@ func (s *Server) restore() error {
 		log.Printf("restored code_seq=%d", maxSeq)
 	}
 
-	// Restore operation sequence.
+	// Restore operation sequence and block time.
 	var seqStr string
 	err = s.db.QueryRow("SELECT value FROM meta WHERE key = 'op_seq'").Scan(&seqStr)
 	if err == nil {
 		if n, err := strconv.ParseUint(seqStr, 10, 64); err == nil {
-			s.vm.SetBlockInfo(n, uint64(time.Now().UnixNano()))
-			log.Printf("restored op_seq=%d", n)
+			blockTime := uint64(time.Now().UnixNano())
+			var btStr string
+			if btErr := s.db.QueryRow("SELECT value FROM meta WHERE key = 'block_time'").Scan(&btStr); btErr == nil {
+				if bt, parseErr := strconv.ParseUint(btStr, 10, 64); parseErr == nil {
+					blockTime = bt
+				}
+			}
+			s.vm.SetBlockInfo(n, blockTime)
+			log.Printf("restored op_seq=%d block_time=%d", n, blockTime)
 		}
 	}
 
 	return nil
 }
 
-// getInstanceCount approximates the instance count by counting contract rows.
-func (s *Server) getInstanceCount() (int, error) {
-	var count int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM contracts").Scan(&count); err != nil {
-		return 0, fmt.Errorf("count contracts: %w", err)
-	}
-	return count, nil
+// getInstanceCount returns the VM's monotonic instance counter.
+func (s *Server) getInstanceCount() uint64 {
+	return s.vm.GetInstanceCount()
 }
 
 func (s *Server) tickOp(db dbExecer) error {
 	s.vm.TickOp()
-	_, err := db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('op_seq', ?)",
-		fmt.Sprintf("%d", s.vm.GetOpSeq()))
+	if _, err := db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('op_seq', ?)",
+		fmt.Sprintf("%d", s.vm.GetOpSeq())); err != nil {
+		return err
+	}
+	_, err := db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('block_time', ?)",
+		fmt.Sprintf("%d", time.Now().UnixNano()))
 	return err
 }
 

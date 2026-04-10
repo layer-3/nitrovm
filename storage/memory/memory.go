@@ -3,6 +3,7 @@ package memory
 
 import (
 	"bytes"
+	"fmt"
 	"sort"
 	"sync"
 
@@ -104,10 +105,12 @@ func (s *Store) Savepoint(name string) error {
 func (s *Store) RollbackTo(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if snap, ok := s.snapshots[name]; ok {
-		s.data = snap
-		delete(s.snapshots, name)
+	snap, ok := s.snapshots[name]
+	if !ok {
+		return fmt.Errorf("savepoint %q not found", name)
 	}
+	s.data = s.deepCopyFrom(snap)
+	delete(s.snapshots, name)
 	return nil
 }
 
@@ -120,8 +123,12 @@ func (s *Store) ReleaseSavepoint(name string) error {
 }
 
 func (s *Store) deepCopy() map[core.Address]map[string][]byte {
-	cp := make(map[core.Address]map[string][]byte, len(s.data))
-	for addr, m := range s.data {
+	return s.deepCopyFrom(s.data)
+}
+
+func (s *Store) deepCopyFrom(src map[core.Address]map[string][]byte) map[core.Address]map[string][]byte {
+	cp := make(map[core.Address]map[string][]byte, len(src))
+	for addr, m := range src {
 		cm := make(map[string][]byte, len(m))
 		for k, v := range m {
 			cm[k] = append([]byte(nil), v...)

@@ -22,33 +22,47 @@ import (
 // ---------------------------------------------------------------------------
 
 // contractKVStore wraps a StorageAdapter for a specific contract address,
-// implementing wasmvmtypes.KVStore.
+// implementing wasmvmtypes.KVStore. The first storage error is captured in
+// the err field so callers can check it after execution.
 type contractKVStore struct {
 	addr    core.Address
 	adapter storage.StorageAdapter
+	err     error // first storage error encountered
 }
 
-func newContractKVStore(addr core.Address, adapter storage.StorageAdapter) wasmvmtypes.KVStore {
+func newContractKVStore(addr core.Address, adapter storage.StorageAdapter) *contractKVStore {
 	return &contractKVStore{addr: addr, adapter: adapter}
 }
 
 func (s *contractKVStore) Get(key []byte) []byte {
+	if s.err != nil {
+		return nil
+	}
 	val, err := s.adapter.Get(s.addr, key)
 	if err != nil {
-		log.Printf("storage get error (contract=%s): %v", s.addr.Hex(), err)
+		s.err = fmt.Errorf("storage get (contract=%s): %w", s.addr.Hex(), err)
+		log.Printf("%v", s.err)
 	}
 	return val
 }
 
 func (s *contractKVStore) Set(key, value []byte) {
+	if s.err != nil {
+		return
+	}
 	if err := s.adapter.Set(s.addr, key, value); err != nil {
-		log.Printf("storage set error (contract=%s): %v", s.addr.Hex(), err)
+		s.err = fmt.Errorf("storage set (contract=%s): %w", s.addr.Hex(), err)
+		log.Printf("%v", s.err)
 	}
 }
 
 func (s *contractKVStore) Delete(key []byte) {
+	if s.err != nil {
+		return
+	}
 	if err := s.adapter.Delete(s.addr, key); err != nil {
-		log.Printf("storage delete error (contract=%s): %v", s.addr.Hex(), err)
+		s.err = fmt.Errorf("storage delete (contract=%s): %w", s.addr.Hex(), err)
+		log.Printf("%v", s.err)
 	}
 }
 
@@ -106,21 +120,21 @@ func newGoAPI() wasmvmtypes.GoAPI {
 
 func humanizeAddress(canonical []byte) (string, uint64, error) {
 	if len(canonical) != 20 {
-		return "", 0, fmt.Errorf("invalid canonical address length: %d", len(canonical))
+		return "", GasCostAddrOp, fmt.Errorf("invalid canonical address length: %d", len(canonical))
 	}
-	return "0x" + hex.EncodeToString(canonical), 0, nil
+	return "0x" + hex.EncodeToString(canonical), GasCostAddrOp, nil
 }
 
 func canonicalizeAddress(human string) ([]byte, uint64, error) {
 	s := core.TrimHexPrefix(human)
 	if len(s) != 40 {
-		return nil, 0, fmt.Errorf("invalid address length: %d hex chars, want 40", len(s))
+		return nil, GasCostAddrOp, fmt.Errorf("invalid address length: %d hex chars, want 40", len(s))
 	}
 	b, err := hex.DecodeString(s)
 	if err != nil {
-		return nil, 0, fmt.Errorf("invalid hex: %w", err)
+		return nil, GasCostAddrOp, fmt.Errorf("invalid hex: %w", err)
 	}
-	return b, 0, nil
+	return b, GasCostAddrOp, nil
 }
 
 func validateAddress(human string) (uint64, error) {
@@ -133,17 +147,19 @@ func validateAddress(human string) (uint64, error) {
 // ---------------------------------------------------------------------------
 
 type chainQuerier struct {
-	vm          *NitroVM
-	gasConsumed uint64
+	vm       *NitroVM
+	gasMeter *GasMeter
 }
 
-func newChainQuerier(vm *NitroVM) wasmvmtypes.Querier {
-	return &chainQuerier{vm: vm}
+func newChainQuerier(vm *NitroVM, gasMeter *GasMeter) *chainQuerier {
+	return &chainQuerier{vm: vm, gasMeter: gasMeter}
 }
 
 func (q *chainQuerier) Query(request wasmvmtypes.QueryRequest, gasLimit uint64) ([]byte, error) {
 	if request.Bank != nil {
-		q.gasConsumed += GasCostStorageRead
+		if err := q.gasMeter.ConsumeGas(GasCostStorageRead); err != nil {
+			return nil, fmt.Errorf("query out of gas: %w", err)
+		}
 		return q.bankQuery(request.Bank)
 	}
 	if request.Wasm != nil {
@@ -152,7 +168,7 @@ func (q *chainQuerier) Query(request wasmvmtypes.QueryRequest, gasLimit uint64) 
 	return nil, fmt.Errorf("unsupported query type")
 }
 
-func (q *chainQuerier) GasConsumed() uint64 { return q.gasConsumed }
+func (q *chainQuerier) GasConsumed() uint64 { return q.gasMeter.GasConsumed() }
 
 func (q *chainQuerier) bankQuery(query *wasmvmtypes.BankQuery) ([]byte, error) {
 	if query.Balance != nil {
@@ -190,7 +206,9 @@ func (q *chainQuerier) wasmQuery(query *wasmvmtypes.WasmQuery, gasLimit uint64) 
 			return nil, err
 		}
 		result, gasUsed, err := q.vm.Query(addr, query.Smart.Msg, gasLimit)
-		q.gasConsumed += gasUsed
+		if consumeErr := q.gasMeter.ConsumeGas(gasUsed); consumeErr != nil {
+			return nil, fmt.Errorf("cross-contract query out of gas: %w", consumeErr)
+		}
 		if err != nil {
 			return nil, err
 		}

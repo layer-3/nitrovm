@@ -21,6 +21,7 @@ type VM interface {
 	GetOpSeq() uint64
 	RegisterContract(addr, creator core.Address, checksum []byte, label string)
 	SetInstanceCount(count uint64)
+	GetInstanceCount() uint64
 	ListCodes() []string
 	ListContracts() []core.ContractInfo
 	GetContractInfo(addr core.Address) *core.ContractInfo

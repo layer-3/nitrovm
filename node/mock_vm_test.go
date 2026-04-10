@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	wasmvmtypes "github.com/CosmWasm/wasmvm/v2/types"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 
 	"github.com/layer-3/nitrovm/core"
 	"github.com/layer-3/nitrovm/crypto"
@@ -152,6 +152,8 @@ func (m *mockVM) SetInstanceCount(count uint64) {
 	}
 }
 
+func (m *mockVM) GetInstanceCount() uint64 { return 0 }
+
 func (m *mockVM) ListCodes() []string {
 	if m.codes != nil {
 		return m.codes
@@ -199,8 +201,8 @@ func (m *mockVM) ChainID() string {
 }
 
 func (m *mockVM) Snapshot() any { m.snapshotCount++; return m.snapshotCount }
-func (m *mockVM) Restore(any)  { m.restoreCount++ }
-func (m *mockVM) Close()       {}
+func (m *mockVM) Restore(any)   { m.restoreCount++ }
+func (m *mockVM) Close()        {}
 
 // ---------------------------------------------------------------------------
 // Test helpers

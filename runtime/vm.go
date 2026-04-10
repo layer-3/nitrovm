@@ -102,6 +102,10 @@ func (n *NitroVM) validateNonce(sender core.Address, nonce *uint64) error {
 // StoreCode uploads WASM bytecode. Returns the code ID (checksum) and gas used.
 // If sender and nonce are non-nil, validates and increments the sender's nonce.
 func (n *NitroVM) StoreCode(code []byte, sender *core.Address, nonce *uint64) ([]byte, uint64, error) {
+	if len(code) > MaxCodeSize {
+		return nil, 0, fmt.Errorf("%w: %d bytes exceeds %d byte limit", core.ErrCodeTooLarge, len(code), MaxCodeSize)
+	}
+
 	if sender != nil {
 		if err := n.validateNonce(*sender, nonce); err != nil {
 			return nil, 0, err
@@ -180,10 +184,13 @@ func (n *NitroVM) instantiateInternal(
 	info := wasmvmtypes.MessageInfo{Sender: sender.Hex(), Funds: funds}
 	store := newContractKVStore(addr, n.storage)
 	gasMeter := NewGasMeter(gasLimit)
-	querier := newChainQuerier(n)
+	querier := newChainQuerier(n, gasMeter)
 	deserCost := wasmvmtypes.UFraction{Numerator: 1, Denominator: 1}
 
 	result, gasUsed, err := n.vm.Instantiate(checksum, env, info, msg, store, n.api, querier, gasMeter, gasLimit, deserCost)
+	if store.err != nil {
+		return nil, fmt.Errorf("%w: %v", core.ErrStorageError, store.err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
 	}
@@ -264,10 +271,13 @@ func (n *NitroVM) executeInternal(
 	info := wasmvmtypes.MessageInfo{Sender: sender.Hex(), Funds: funds}
 	store := newContractKVStore(contract, n.storage)
 	gasMeter := NewGasMeter(gasLimit)
-	querier := newChainQuerier(n)
+	querier := newChainQuerier(n, gasMeter)
 	deserCost := wasmvmtypes.UFraction{Numerator: 1, Denominator: 1}
 
 	result, gasUsed, err := n.vm.Execute(checksum, env, info, msg, store, n.api, querier, gasMeter, gasLimit, deserCost)
+	if store.err != nil {
+		return nil, fmt.Errorf("%w: %v", core.ErrStorageError, store.err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("execute: %w", err)
 	}
@@ -315,10 +325,13 @@ func (n *NitroVM) Query(contract core.Address, msg []byte, gasLimit uint64) ([]b
 	env := n.makeEnv(contract)
 	store := newContractKVStore(contract, n.storage)
 	gasMeter := NewGasMeter(gasLimit)
-	querier := newChainQuerier(n)
+	querier := newChainQuerier(n, gasMeter)
 	deserCost := wasmvmtypes.UFraction{Numerator: 1, Denominator: 1}
 
 	result, gasUsed, err := n.vm.Query(checksum, env, msg, store, n.api, querier, gasMeter, gasLimit, deserCost)
+	if store.err != nil {
+		return nil, gasUsed, fmt.Errorf("%w: %v", core.ErrStorageError, store.err)
+	}
 	if err != nil {
 		return nil, gasUsed, fmt.Errorf("query: %w", err)
 	}
@@ -383,6 +396,13 @@ func (n *NitroVM) SetInstanceCount(count uint64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.instanceCount = count
+}
+
+// GetInstanceCount returns the current instance counter value.
+func (n *NitroVM) GetInstanceCount() uint64 {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.instanceCount
 }
 
 // ListCodes returns all stored code IDs as hex strings.
@@ -478,7 +498,7 @@ func (n *NitroVM) defaultReply(
 	gasLimit uint64,
 ) (*wasmvmtypes.ContractResult, uint64, error) {
 	gasMeter := NewGasMeter(gasLimit)
-	querier := newChainQuerier(n)
+	querier := newChainQuerier(n, gasMeter)
 	deserCost := wasmvmtypes.UFraction{Numerator: 1, Denominator: 1}
 	return n.vm.Reply(checksum, env, reply, store, n.api, querier, gasMeter, gasLimit, deserCost)
 }
@@ -787,11 +807,11 @@ func (n *NitroVM) Snapshot() any {
 	}
 	codes := make(map[string]cosmwasm.Checksum, len(n.codes))
 	for k, v := range n.codes {
-		codes[k] = v
+		codes[k] = append(cosmwasm.Checksum(nil), v...)
 	}
 	codeBySeq := make(map[uint64]cosmwasm.Checksum, len(n.codeBySeq))
 	for k, v := range n.codeBySeq {
-		codeBySeq[k] = v
+		codeBySeq[k] = append(cosmwasm.Checksum(nil), v...)
 	}
 	seqByCode := make(map[string]uint64, len(n.seqByCode))
 	for k, v := range n.seqByCode {
@@ -852,10 +872,13 @@ func (n *NitroVM) makeEnv(contract core.Address) wasmvmtypes.Env {
 func (n *NitroVM) transferFunds(from, to core.Address, funds []wasmvmtypes.Coin) error {
 	for _, coin := range funds {
 		if coin.Denom != "YELLOW" {
-			continue
+			return fmt.Errorf("%w: %q", core.ErrUnsupportedDenom, coin.Denom)
 		}
 		amt, err := core.NewAmountFromString(coin.Amount)
-		if err != nil || amt.IsZero() {
+		if err != nil {
+			return fmt.Errorf("invalid fund amount %q: %w", coin.Amount, err)
+		}
+		if amt.IsZero() {
 			continue
 		}
 		fromAcct := n.getOrCreateAccount(from)

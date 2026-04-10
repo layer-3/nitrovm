@@ -10,6 +10,10 @@ const (
 	GasCostHashPerByte      = 3
 	GasCostSigVerify        = 3000
 	GasCostStoreCodePerByte = 420_000
+	GasCostAddrOp           = 50
+
+	// MaxCodeSize is the maximum allowed WASM bytecode size (2 MB).
+	MaxCodeSize = 2 * 1024 * 1024
 )
 
 // GasMeter tracks gas consumption during contract execution.
